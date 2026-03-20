@@ -85,3 +85,36 @@ plt.tight_layout()
 plt.savefig("output/comparacion_preprocesamiento.png", dpi=150, bbox_inches="tight")
 print("✓ Guardado en output/comparacion_preprocesamiento.png")
 plt.show()
+
+# ── Visualización de segmentación — enfoque en depth ─────────────────────────
+from src.segmentation import segment_body, DEFAULT_DEPTH_MAX_MM
+
+print("\nAplicando segmentación para visualización...")
+seg = segment_body(rgb, depth_clean)
+
+fig3, axes3 = plt.subplots(1, 3, figsize=(18, 5))
+fig3.suptitle("Segmentación — silueta extraída del mapa de profundidad", fontsize=13)
+
+# Depth limpio completo (con fondo)
+axes3[0].imshow(depth_clean, cmap="plasma", vmin=300, vmax=4000)
+axes3[0].set_title("Depth preprocesado (con fondo)")
+axes3[0].axis("off")
+
+# Máscara binaria
+axes3[1].imshow(seg["mask"], cmap="gray")
+axes3[1].set_title(f"Máscara de silueta — {seg['body_pixels']:,} píxeles")
+axes3[1].axis("off")
+
+# Depth solo de la persona — esto es lo que nos interesa
+depth_body_viz = seg["depth_body"].copy()
+depth_body_viz[depth_body_viz == 0] = np.nan  # fondo transparente
+im3 = axes3[2].imshow(depth_body_viz, cmap="plasma",
+                       vmin=300, vmax=DEFAULT_DEPTH_MAX_MM)
+axes3[2].set_title("Silueta de profundidad — solo persona")
+axes3[2].axis("off")
+plt.colorbar(im3, ax=axes3[2], label="mm")
+
+plt.tight_layout()
+plt.savefig("output/segmentacion.png", dpi=150, bbox_inches="tight")
+print("✓ Guardado en output/segmentacion.png")
+plt.show()

@@ -47,11 +47,14 @@ def main() -> None:
 
 
     # ── Step 3: Segmentation (coming later) ───────────────────────────────────
-    # from src.segmentation import segment_body
-    # mask = segment_body(frame)
+    print("\n[Step 3] Segmentando silueta corporal...")
+    from src.segmentation import segment_body
+    seg = segment_body(rgb, depth_clean)
 
-    print("\n[Done] Pipeline complete for today's step.")
-
+    print(f"✓ Máscara generada:  shape={seg['mask'].shape}, "
+          f"dtype={seg['mask'].dtype}")
+    print(f"✓ Umbral usado:      {seg['threshold']:.0f} mm")
+    print(f"✓ Píxeles del cuerpo: {seg['body_pixels']:,}")
 
 if __name__ == "__main__":
     main()
