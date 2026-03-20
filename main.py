@@ -37,9 +37,14 @@ def main() -> None:
     print(f"  ✓ Depth range:       min={depth.min():.1f} mm, "
           f"max={depth.max():.1f} mm")
 
-    # ── Step 2: Preprocessing (next session) ──────────────────────────────────
-    # from src.preprocessing import preprocess_frame
-    # frame = preprocess_frame(frame)
+    # ── Step 2: Preprocessing ──────────────────────────────────
+    print("\n[Step 2] Preprocesando mapa de profundidad...")
+    from src.preprocessing import preprocess_depth
+    depth_clean = preprocess_depth(depth)
+    print(f"✓ Depth preprocesado: shape={depth_clean.shape}, "
+          f"dtype={depth_clean.dtype}")
+
+
 
     # ── Step 3: Segmentation (coming later) ───────────────────────────────────
     # from src.segmentation import segment_body
