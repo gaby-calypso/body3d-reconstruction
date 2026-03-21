@@ -44,17 +44,20 @@ def main() -> None:
     print(f"✓ Depth preprocesado: shape={depth_clean.shape}, "
           f"dtype={depth_clean.dtype}")
 
-
-
     # ── Step 3: Segmentation (coming later) ───────────────────────────────────
     print("\n[Step 3] Segmentando silueta corporal...")
     from src.segmentation import segment_body
     seg = segment_body(rgb, depth_clean)
 
-    print(f"✓ Máscara generada:  shape={seg['mask'].shape}, "
+    print(f"  ✓ Máscara generada:  shape={seg['mask'].shape}, "
           f"dtype={seg['mask'].dtype}")
-    print(f"✓ Umbral usado:      {seg['threshold']:.0f} mm")
-    print(f"✓ Píxeles del cuerpo: {seg['body_pixels']:,}")
+    print(f"  ✓ Píxeles del cuerpo: {seg['body_pixels']:,}")
+
+    # ── Step 4: 3D Reconstruction ─────────────────────────────────────────────
+    print("\n[Step 4] Reconstruyendo nube de puntos 3D...")
+    from src.reconstruction import reconstruct_pointcloud
+    pcd = reconstruct_pointcloud(seg["depth_body"], seg["rgb_body"])
+    print(f"  ✓ Nube de puntos lista: {len(pcd.points):,} puntos 3D")
 
 if __name__ == "__main__":
     main()

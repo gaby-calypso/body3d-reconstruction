@@ -118,3 +118,45 @@ plt.tight_layout()
 plt.savefig("output/segmentacion.png", dpi=150, bbox_inches="tight")
 print("✓ Guardado en output/segmentacion.png")
 plt.show()
+
+# ── Visualización 3D directa del depth segmentado ─────────────────────────────
+import open3d as o3d
+
+print("\nProyectando silueta de profundidad a 3D...")
+
+# Parámetros intrínsecos D455
+fx, fy, cx, cy = 674.42, 649.46, 640.0, 360.0
+
+depth = seg["depth_body"]
+H, W  = depth.shape
+
+# Grilla de píxeles
+u, v = np.meshgrid(np.arange(W), np.arange(H))
+
+# Solo píxeles válidos de la silueta
+valid = depth > 0
+Z = depth[valid].astype(np.float64)
+X = ((u[valid] - cx) * Z / fx)
+Y = ((v[valid] - cy) * Z / fy)
+
+points = np.column_stack([X, Y, Z])
+
+# Colorear por profundidad con plasma
+import matplotlib
+z_norm = (Z - Z.min()) / (Z.max() - Z.min())
+colors = matplotlib.colormaps["plasma"](z_norm)[:, :3]
+
+# Crear y mostrar nube
+pcd = o3d.geometry.PointCloud()
+pcd.points = o3d.utility.Vector3dVector(points)
+pcd.colors = o3d.utility.Vector3dVector(colors)
+
+print(f"  ✓ {len(points):,} puntos")
+print("  → Mouse para rotar | Scroll para zoom | Q para cerrar")
+
+o3d.visualization.draw_geometries(
+    [pcd],
+    window_name="Silueta 3D — depth segmentado",
+    width=1024,
+    height=768
+)
