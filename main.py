@@ -70,5 +70,17 @@ def main() -> None:
         print(f"  {zone:10s}: {data['circumference_cm']} cm")
     print("  " + "-" * 40)
 
+    # ── Step 6: Visualization — PDF Report ────────────────────────────────────
+    print("\n[Step 6] Generando reporte PDF...")
+    from src.visualization import generate_report
+    generate_report(
+        frame       = {"rgb": rgb, "depth": depth},
+        depth_clean = depth_clean,
+        seg         = seg,
+        measurements= measurements,
+        output_path = "output/reporte_final.pdf"
+    )
+    print("  ✓ Reporte generado en output/reporte_final.pdf")
+
 if __name__ == "__main__":
     main()
