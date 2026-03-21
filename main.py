@@ -59,5 +59,16 @@ def main() -> None:
     pcd = reconstruct_pointcloud(seg["depth_body"], seg["rgb_body"])
     print(f"  ✓ Nube de puntos lista: {len(pcd.points):,} puntos 3D")
 
+    # ── Step 5: Measurements ──────────────────────────────────────────────────
+    print("\n[Step 5] Extrayendo medidas antropométricas...")
+    from src.measurements import extract_measurements
+    measurements = extract_measurements(seg["mask"], seg["depth_body"])
+
+    print("\n  Resumen de medidas:")
+    print("  " + "-" * 40)
+    for zone, data in measurements.items():
+        print(f"  {zone:10s}: {data['circumference_cm']} cm")
+    print("  " + "-" * 40)
+
 if __name__ == "__main__":
     main()

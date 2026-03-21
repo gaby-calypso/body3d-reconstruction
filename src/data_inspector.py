@@ -160,3 +160,67 @@ o3d.visualization.draw_geometries(
     width=1024,
     height=768
 )
+
+# ── Reporte visual de medidas antropométricas ─────────────────────────────────
+from src.measurements import extract_measurements
+
+print("\nExtrayendo medidas antropométricas...")
+measurements = extract_measurements(seg["mask"], seg["depth_body"])
+
+fig4, axes4 = plt.subplots(1, 2, figsize=(14, 7))
+fig4.suptitle("Medidas antropométricas — RealSense D455", fontsize=13)
+
+# Izquierda: silueta con líneas de medición
+depth_viz = seg["depth_body"].copy()
+depth_viz[depth_viz == 0] = np.nan
+axes4[0].imshow(depth_viz, cmap="plasma", vmin=1000, vmax=1700)
+axes4[0].set_title("Zonas de medición")
+axes4[0].axis("off")
+
+zone_colors = {"cuello": "cyan", "pecho": "yellow", "cintura": "lime", "cadera": "orange"}
+zone_rows = {"cuello": 287, "pecho": 375, "cintura": 448, "cadera": 487}
+for zone, y in zone_rows.items():
+    if zone in measurements:
+        circ = measurements[zone]['circumference_cm']
+        axes4[0].axhline(y=y, color=zone_colors[zone], linewidth=1.5,
+                         linestyle="--", alpha=0.8)
+        axes4[0].text(530, y - 8, f"{zone} ({circ}cm)",
+                      color=zone_colors[zone], fontsize=8, fontweight="bold")
+
+# Derecha: tabla de resultados
+axes4[1].axis("off")
+table_data = []
+for zone, data in measurements.items():
+    table_data.append([
+        zone.capitalize(),
+        f"{data['width_mm']:.0f} mm",
+        f"{data['delta_mm']:.0f} mm",
+        f"{data['circumference_cm']:.1f} cm",
+    ])
+
+table = axes4[1].table(
+    cellText=table_data,
+    colLabels=["Zona", "Ancho frontal", "Grosor est.", "Contorno"],
+    loc="center",
+    cellLoc="center"
+)
+table.auto_set_font_size(False)
+table.set_fontsize(12)
+table.scale(1.2, 2.2)
+
+# Colorear encabezados
+for j in range(4):
+    table[0, j].set_facecolor("#2C2C2A")
+    table[0, j].set_text_props(color="white", fontweight="bold")
+
+zone_bg = {"cuello": "#E6F1FB", "pecho": "#FAEEDA", "cintura": "#EAF3DE", "cadera": "#EEEDFE"}
+for i, zone in enumerate(measurements.keys()):
+    for j in range(4):
+        table[i + 1, j].set_facecolor(zone_bg.get(zone, "#F1EFE8"))
+
+axes4[1].set_title("Resultados de medición", pad=20)
+
+plt.tight_layout()
+plt.savefig("output/medidas_antropometricas.png", dpi=150, bbox_inches="tight")
+print("✓ Guardado en output/medidas_antropometricas.png")
+plt.show()
