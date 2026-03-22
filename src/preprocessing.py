@@ -39,8 +39,8 @@ def remove_invalid_pixels(depth: np.ndarray) -> np.ndarray:
         depth con píxeles inválidos reemplazados por NaN
     """
     cleaned = depth.copy()
-    cleaned[depth == 0]     = np.nan
-    cleaned[depth >= 65535] = np.nan
+    cleaned[(depth == 0)|(depth >= 65535)]     = np.nan
+    # cleaned[depth >= 65535] = np.nan
     return cleaned
 
 
