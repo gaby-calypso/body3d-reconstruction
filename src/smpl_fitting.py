@@ -231,18 +231,20 @@ def generate_smpl_mesh(measurements: dict,
     for z, v in target.items():
         print(f"    {z:10s}: {v:.1f} cm")
 
-    # Intentar usar cache para evitar reoptimizar
+    # ── Usar cache para evitar reoptimizar ────────────────────────────────────
+    # El género forma parte del hash — cambiar de neutral a male/female
+    # invalida el cache correctamente.
     from src.smpl_cache import load_cached_betas, save_cached_betas
-    cached = load_cached_betas(target)
+    cached = load_cached_betas(target, gender)
     if cached is not None:
         print("  ✓ Usando betas cacheados (sin reoptimizar)")
         betas_opt  = cached
         final_meas = get_all_measurements(model, betas_opt)
     else:
         betas_opt, final_meas = fit_betas_to_targets(model, target)
-        save_cached_betas(target, betas_opt)
+        save_cached_betas(target, betas_opt, gender)
         print("  ✓ Betas guardados en cache")
-        
+
     print("\n  Resultados:")
     print("  " + "-" * 48)
     print(f"  {'Zona':10s} {'Objetivo':>10s} {'SMPL':>10s} {'Error':>8s}")

@@ -62,7 +62,7 @@ def main() -> None:
     # ── Step 5: Measurements ──────────────────────────────────────────────────
     print("\n[Step 5] Extrayendo medidas antropométricas...")
     from src.measurements import extract_measurements
-    measurements = extract_measurements(seg["mask"], seg["depth_body"])
+    measurements = extract_measurements(mask, seg["depth_body"], rgb_image=rgb)
 
     print("\n  Resumen de medidas:")
     print("  " + "-" * 40)

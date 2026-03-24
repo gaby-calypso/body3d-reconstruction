@@ -5,11 +5,15 @@ Extrae medidas antropométricas de la silueta de profundidad segmentada.
 
 Estrategia:
     Para cada zona del cuerpo (cuello, pecho, cintura, cadera):
-    1. Identificar la fila Y representativa de esa zona
+    1. Identificar la fila Y de la zona usando BODY_ZONES (calibradas manualmente)
     2. Medir el ancho W en mm usando proyección inversa pinhole
     3. Medir la profundidad D en mm usando percentiles robustos (p10-p90)
     4. Modelar la sección transversal como una elipse (a=W/2, b=D/2)
     5. Calcular el perímetro con la fórmula de Ramanujan
+
+Nota:
+    La visualización de landmarks MediaPipe sobre las imágenes se realiza
+    en src/pose_overlay.py — este módulo solo se ocupa de las mediciones.
 
 Limitación conocida:
     Con vista frontal única no tenemos la parte trasera del cuerpo.
@@ -25,6 +29,7 @@ Outputs:
 """
 
 import numpy as np
+from typing import Optional
 
 
 # ── Parámetros intrínsecos D455 ───────────────────────────────────────────────
@@ -33,16 +38,43 @@ FY = 649.46
 CX = 640.00
 CY = 360.00
 
-# ── Zonas del cuerpo calibradas para esta sesión ─────────────────────────────
+# ── Zonas de medición calibradas manualmente ──────────────────────────────────
 # Determinadas empíricamente del análisis de distribución de la silueta.
-# Cada zona es un rango de filas Y — se promedia para mayor robustez.
+# rows:      (y_start, y_end) — banda de filas a promediar para robustez
+# width_pct: fracción del ancho central a usar (excluye brazos pegados al cuerpo)
 BODY_ZONES = {
-    "cuello":  {"rows": (288, 300), "width_pct": 100.0},
-    "pecho":   {"rows": (370, 390), "width_pct":  75.0},
-    "cintura": {"rows": (460, 475), "width_pct": 100.0},
-    "cadera":  {"rows": (490, 510), "width_pct":  80.0},
+    "cuello":  {"rows": (284, 292), "width_pct": 100.0},
+    "pecho":   {"rows": (371, 381), "width_pct":  75.0},
+    "cintura": {"rows": (444, 454), "width_pct": 100.0},
+    "cadera":  {"rows": (483, 493), "width_pct":  80.0},
 }
 
+
+def build_zones(rgb_image: Optional[np.ndarray] = None) -> dict:
+    """
+    Devuelve el diccionario de zonas de medición en formato unificado.
+
+    El parámetro rgb_image se acepta por compatibilidad con multi_view_pipeline
+    pero no se usa aquí — los landmarks MediaPipe son responsabilidad
+    exclusiva de src/pose_overlay.py.
+
+    Args:
+        rgb_image: ignorado (mantenido por compatibilidad de firma)
+
+    Returns:
+        dict {zona: {"y_center": int, "rows": (y_start, y_end), "width_pct": float}}
+    """
+    return {
+        name: {
+            "y_center":  (cfg["rows"][0] + cfg["rows"][1]) // 2,
+            "rows":       cfg["rows"],
+            "width_pct":  cfg["width_pct"],
+        }
+        for name, cfg in BODY_ZONES.items()
+    }
+
+
+# ── Proyección y geometría ────────────────────────────────────────────────────
 
 def pixels_to_mm_width(width_px: int, depth_mm: float,
                         fx: float = FX) -> float:
@@ -51,8 +83,6 @@ def pixels_to_mm_width(width_px: int, depth_mm: float,
 
     Usa la proyección pinhole inversa:
         width_mm = width_px * depth_mm / fx
-
-    Esto da el tamaño real del objeto a la distancia depth_mm.
 
     Args:
         width_px:  ancho medido en píxeles
@@ -69,17 +99,15 @@ def ramanujan_perimeter(a: float, b: float) -> float:
     """
     Calcula el perímetro de una elipse con la aproximación de Ramanujan.
 
-    Esta es la mejor aproximación cerrada conocida para el perímetro
-    de una elipse. El error es menor al 0.0004% para proporciones
-    típicas del cuerpo humano.
+    Error < 0.0004% para proporciones típicas del cuerpo humano.
 
     Fórmula:
         h = (a - b)² / (a + b)²
         C ≈ π(a + b)(1 + 3h / (10 + √(4 - 3h)))
 
     Args:
-        a: semi-eje mayor en mm (la mitad del ancho)
-        b: semi-eje menor en mm (la mitad de la profundidad)
+        a: semi-eje mayor en mm (mitad del ancho frontal)
+        b: semi-eje menor en mm (mitad de la profundidad)
 
     Returns:
         perímetro aproximado en mm
@@ -87,15 +115,16 @@ def ramanujan_perimeter(a: float, b: float) -> float:
     if a <= 0 or b <= 0:
         return 0.0
     h = ((a - b) / (a + b)) ** 2
-    perimeter = np.pi * (a + b) * (1 + 3 * h / (10 + np.sqrt(4 - 3 * h)))
-    return float(perimeter)
+    return float(np.pi * (a + b) * (1 + 3 * h / (10 + np.sqrt(4 - 3 * h))))
 
+
+# ── Medición por fila ─────────────────────────────────────────────────────────
 
 def measure_row_range(mask: np.ndarray,
                       depth_body: np.ndarray,
                       y_start: int,
                       y_end: int,
-                      width_percentile: float = 100.0) -> dict | None:
+                      width_percentile: float = 100.0) -> Optional[dict]:
     """
     Mide el ancho y la profundidad promedio en un rango de filas.
 
@@ -109,7 +138,6 @@ def measure_row_range(mask: np.ndarray,
         y_start:          fila inicial del rango
         y_end:            fila final del rango
         width_percentile: fracción del ancho central a usar (default 100%)
-                          usar 70-80% para excluir brazos pegados al cuerpo
 
     Returns:
         dict con width_px, width_mm, depth_mm, delta_mm, best_y
@@ -131,7 +159,6 @@ def measure_row_range(mask: np.ndarray,
         cols = np.where(row_mask)[0]
         total_w = len(cols)
 
-        # Recortar lateralmente para excluir brazos
         if width_percentile < 100.0:
             margin = int(total_w * (1.0 - width_percentile / 100.0) / 2)
             margin = max(0, margin)
@@ -144,8 +171,7 @@ def measure_row_range(mask: np.ndarray,
         if len(cols_trimmed) < 3:
             continue
 
-        w = len(cols_trimmed)
-        widths_px.append(w)
+        widths_px.append(len(cols_trimmed))
 
         d_near = float(np.percentile(depth_trimmed, 10))
         d_far  = float(np.percentile(depth_trimmed, 90))
@@ -174,13 +200,10 @@ def measure_row_range(mask: np.ndarray,
         "best_y":    best_y,
     }
 
+
 def compute_circumference(width_mm: float, delta_mm: float) -> float:
     """
     Calcula la circunferencia modelando la sección como elipse.
-
-    Semi-ejes:
-        a = width_mm / 2   (mitad del ancho frontal)
-        b = delta_mm / 2   (mitad de la profundidad estimada)
 
     Args:
         width_mm:  ancho frontal en mm
@@ -189,32 +212,38 @@ def compute_circumference(width_mm: float, delta_mm: float) -> float:
     Returns:
         circunferencia en mm
     """
-    a = width_mm / 2.0
-    b = delta_mm / 2.0
-    return ramanujan_perimeter(a, b)
+    return ramanujan_perimeter(width_mm / 2.0, delta_mm / 2.0)
+
+
+# ── Función principal ─────────────────────────────────────────────────────────
 
 def extract_measurements(mask: np.ndarray,
                           depth_body: np.ndarray,
-                          zones: dict = BODY_ZONES) -> dict:
+                          rgb_image: Optional[np.ndarray] = None,
+                          zones: Optional[dict] = None) -> dict:
     """
     Función principal: extrae todas las medidas antropométricas.
 
-    Para cada zona aplica el recorte lateral configurado para
-    excluir los brazos cuando están pegados al cuerpo.
+    Usa las zonas de BODY_ZONES (calibradas manualmente).
+    El parámetro rgb_image se acepta por compatibilidad pero no se usa.
 
     Args:
         mask:       máscara binaria (H, W) uint8
         depth_body: depth segmentado (H, W) float32 en mm
-        zones:      dict con nombre → {rows, width_pct}
+        rgb_image:  ignorado (compatibilidad de firma)
+        zones:      override manual del dict de zonas (opcional)
 
     Returns:
-        dict por zona con width_mm, delta_mm, circumference_mm/cm
+        dict por zona con width_mm, delta_mm, circumference_mm, circumference_cm, y_px
     """
+    if zones is None:
+        zones = build_zones()
+
     results = {}
 
     for zone_name, config in zones.items():
         y_start, y_end = config["rows"]
-        width_pct      = config["width_pct"]
+        width_pct      = config.get("width_pct", 100.0)
 
         row_data = measure_row_range(
             mask, depth_body, y_start, y_end,
@@ -230,6 +259,7 @@ def extract_measurements(mask: np.ndarray,
         )
 
         results[zone_name] = {
+            "y_px":             config.get("y_center", row_data["best_y"]),
             "width_mm":         round(row_data["width_mm"], 1),
             "depth_mm":         round(row_data["depth_mm"], 1),
             "delta_mm":         round(row_data["delta_mm"], 1),
@@ -240,6 +270,7 @@ def extract_measurements(mask: np.ndarray,
         print(f"  ✓ {zone_name:8s}: "
               f"ancho={row_data['width_mm']:.0f}mm  "
               f"grosor={row_data['delta_mm']:.0f}mm  "
-              f"→ contorno={circ_mm/10:.1f}cm")
+              f"→ contorno={circ_mm/10:.1f}cm  "
+              f"(y={config.get('y_center', row_data['best_y'])}px)")
 
     return results
