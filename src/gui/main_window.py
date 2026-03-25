@@ -236,12 +236,14 @@ class PipelineThread(QThread):
                 # Se pasa rgb_image="frontal" para que combine_measurements
                 # (y dentro de él extract_measurements) active MediaPipe
                 # y calcule y_px automáticamente para cada zona.
-                rgb_frontal = STATE.rgbs.get("frontal")
-
+                # Pasar RGB de todas las vistas para deteccion automatica
                 meas = combine_measurements(
                     _mk("frontal"), _mk("posterior"),
                     _mk("lateral_izq"), _mk("lateral_der"),
-                    rgb_image=rgb_frontal,   # ← activa MediaPipe
+                    rgb_image       = STATE.rgbs.get("frontal"),
+                    rgb_posterior   = STATE.rgbs.get("posterior"),
+                    rgb_lateral_izq = STATE.rgbs.get("lateral_izq"),
+                    rgb_lateral_der = STATE.rgbs.get("lateral_der"),
                 )
 
                 # STATE.measurements guarda el dict completo (no solo circ_cm)
@@ -1221,58 +1223,70 @@ class Page2Measurements(QWidget):
             self.lbl_height.setText(f"Altura estimada: {STATE.height_cm:.1f} cm")
 
     # ── MODIFICACIÓN 4 ─────────────────────────────────────────────────────────
-    def _draw_measurement_lines(self):
+    def _draw_measurement_rects(self):
         """
-        Dibuja líneas horizontales de medición sobre la imagen frontal.
+        Dibuja cuadrantes de medición sobre la imagen depth de cada vista.
 
-        Lee STATE.measurements[zona]["y_px"] (calculado por MediaPipe en
-        extract_measurements) y llama img_w.set_lines() con las coordenadas
-        normalizadas 0-1 que ImageWithOverlay espera.
-
-        Si MediaPipe no estaba disponible y y_px viene del fallback manual,
-        las líneas siguen apareciendo correctamente.
-
-        Colores por zona:
-            cuello  → rojo
-            pecho   → naranja
-            cintura → verde
-            cadera  → azul
+        Para cada zona en STATE.measurements lee rect {x1,y1,x2,y2,view}
+        y dibuja el rectángulo sobre el widget depth correspondiente.
         """
-        COLORS = {
-            "cuello":  "#E24B4A",
-            "pecho":   "#D85A30",
-            "cintura": "#0F6E56",
-            "cadera":  "#185FA5",
+        COLORS_BGR = {
+            "cuello":  (46,  204, 113),
+            "pecho":   (52,  152, 219),
+            "cintura": (231,  76,  60),
+            "cadera":  (155,  89, 182),
+            "brazo":   (241, 196,  15),
+            "muslo":   (230, 126,  34),
+            "rodilla": (52,   73,  94),
         }
 
-        widgets = self._view_images.get("frontal")
-        img_w = widgets["rgb"] if isinstance(widgets, dict) else widgets
-        if img_w is None:
-            return
-
-        rgb = STATE.rgbs.get("frontal")
-        if rgb is None:
-            return
-
-        H = rgb.shape[0]
-        lines = []
-
+        # Agrupar zonas por vista usando all_rects para mostrar en todas
+        rects_by_view = {}
         for zona, data in STATE.measurements.items():
-            # Saltar zonas en formato viejo (float) que no tienen y_px
             if not isinstance(data, dict):
                 continue
-            y_px = data.get("y_px")
-            cm   = data.get("circumference_cm")
-            if y_px is None or cm is None:
+            cm        = data.get("circumference_cm")
+            all_rects = data.get("all_rects") or {}
+            # Fallback a rect simple si no hay all_rects
+            if not all_rects and data.get("rect"):
+                r = data["rect"]
+                all_rects = {r.get("view", "frontal"): r}
+            for view, rect in all_rects.items():
+                if view not in rects_by_view:
+                    rects_by_view[view] = []
+                rects_by_view[view].append((zona, rect, cm))
+
+        # Dibujar sobre la imagen depth de cada vista
+        for view_name, zone_rects in rects_by_view.items():
+            widgets = self._view_images.get(view_name)
+            depth   = STATE.depths.get(view_name)
+            if widgets is None or depth is None:
                 continue
 
-            y_norm = y_px / H                   # normalizado 0-1
-            color  = COLORS.get(zona, "#888780")
-            label  = f"{zona}  {cm} cm"
-            lines.append((y_norm, color, label))
+            # Generar imagen depth coloreada
+            valid = depth[(depth > 300) & (depth < 4000)]
+            if len(valid) == 0:
+                continue
+            d_norm = np.zeros_like(depth, dtype=np.uint8)
+            mask_v = (depth > 300) & (depth < 4000)
+            d_norm[mask_v] = ((depth[mask_v] - valid.min()) /
+                               (valid.max() - valid.min()) * 255).astype(np.uint8)
+            img = cv2.applyColorMap(d_norm, cv2.COLORMAP_PLASMA)
 
-        img_w.set_lines(lines)
-    # ──────────────────────────────────────────────────────────────────────────
+            # Dibujar cada cuadrante
+            for zona, rect, cm in zone_rects:
+                color = COLORS_BGR.get(zona, (255, 255, 255))
+                x1, y1 = rect["x1"], rect["y1"]
+                x2, y2 = rect["x2"], rect["y2"]
+                cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+                label = f"{zona} {cm}cm" if cm else zona
+                cv2.putText(img, label, (x1 + 3, y1 - 5),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1,
+                            cv2.LINE_AA)
+
+            # Actualizar widget depth
+            w_dep = widgets["depth"] if isinstance(widgets, dict) else widgets
+            w_dep.set_image_array(img)
 
     def _open_zone_marker(self, view_name: str):
         import sys
@@ -1401,6 +1415,7 @@ class Page2Measurements(QWidget):
         self.btn_next.setEnabled(True)
         self.lbl_status.setText("Pipeline completado ✓")
         self._update_measurements_display()
+        self._draw_measurement_rects()
 
     def _on_error(self, msg):
         self.btn_run.setEnabled(True)
