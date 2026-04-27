@@ -187,10 +187,10 @@ def draw_landmarks_on_images(
     """
     H, W = rgb_bgr.shape[:2]
 
-    # FIX: _detect_landmarks ya convierte BGR→RGB internamente.
-    # Pasar BGR directo evita la doble conversión que impedía detectar personas.
-    landmarks = _detect_landmarks(rgb_bgr.astype(np.uint8))
-    
+    # STATE.rgbs guarda BGR — convertir a RGB para MediaPipe
+    rgb_for_mp = cv2.cvtColor(rgb_bgr.astype(np.uint8), cv2.COLOR_BGR2RGB)
+
+    landmarks = _detect_landmarks(rgb_for_mp)
     if landmarks is None:
         return None, None, False
 
@@ -212,3 +212,5 @@ def draw_landmarks_on_images(
     depth_annotated = _draw_on_frame(_depth_to_bgr(depth), points_depth)
 
     return rgb_annotated, depth_annotated, True
+
+

@@ -580,6 +580,24 @@ class Page1Capture(QWidget):
         self._update_overlay(name)
         self.lbl_status.setText(f"Frame {name} capturado ✓")
 
+    def _reset_pipeline_state(self):
+        """Limpia el estado derivado para que el pipeline se pueda re-ejecutar."""
+        STATE.rgbs.clear()
+        STATE.depths.clear()
+        STATE.segs.clear()
+        STATE.pcds.clear()
+        STATE.measurements.clear()
+        STATE.diag.clear()
+        STATE.pipeline_done = False
+        STATE.height_cm     = 0.0
+        STATE.smpl_result   = None
+        try:
+            from src.multi_view_pipeline import VIEW_ZONES
+            for v in VIEW_ZONES:
+                VIEW_ZONES[v].clear()
+        except Exception:
+            pass
+
     def _import_images(self):
         data_dir = QFileDialog.getExistingDirectory(
             self, "Seleccionar carpeta con imágenes",
@@ -587,6 +605,9 @@ class Page1Capture(QWidget):
         )
         if not data_dir:
             return
+
+        # FIX: limpiar estado previo antes de cargar nuevas imágenes
+        self._reset_pipeline_state()
 
         data_dir = Path(data_dir)
         loaded = []
@@ -1145,6 +1166,8 @@ class Page2Measurements(QWidget):
         super().showEvent(e)
         self._rebuild_images()
         self._update_measurements_display()
+        if not STATE.pipeline_done:
+            self.btn_next.setEnabled(False)
 
     def _rebuild_images(self):
         while self.img_layout.count():
@@ -1402,8 +1425,21 @@ class Page2Measurements(QWidget):
                                  else "No se detectó ninguna persona.")
 
     def _run_pipeline(self):
+        STATE.measurements.clear()
+        STATE.diag.clear()
+        STATE.pipeline_done = False
+        self.btn_next.setEnabled(False)
+        self._update_measurements_display()
+
         self.btn_run.setEnabled(False)
         self.lbl_status.setText("Ejecutando pipeline...")
+
+        if self._thread is not None and self._thread.isRunning():
+            self._thread.finished.disconnect()
+            self._thread.error.disconnect()
+            self._thread.quit()
+            self._thread.wait(2000)
+
         self._thread = PipelineThread()
         self._thread.progress.connect(self.lbl_status.setText)
         self._thread.finished.connect(self._on_done)
@@ -1414,6 +1450,7 @@ class Page2Measurements(QWidget):
         self.btn_run.setEnabled(True)
         self.btn_next.setEnabled(True)
         self.lbl_status.setText("Pipeline completado ✓")
+        self._rebuild_images()
         self._update_measurements_display()
         self._draw_measurement_rects()
 
