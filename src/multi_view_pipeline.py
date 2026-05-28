@@ -103,17 +103,13 @@ ANATOMICAL_NORM = {
 
 def _detect_landmarks_for_view(rgb: np.ndarray) -> Optional[list]:
     """
-    Detecta los 33 landmarks de MediaPipe en una imagen RGB.
-
-    Args:
-        rgb: imagen BGR (H, W, 3) — formato cv2.imread
-
-    Returns:
-        lista de 33 landmarks normalizados, o None si falla
+    Detecta los 33 landmarks de MediaPipe en una imagen BGR.
+    Convierte BGR→RGB aquí antes de llamar a _detect_landmarks.
     """
     try:
         from src.pose_overlay import _detect_landmarks
         import cv2 as _cv2
+        # _detect_landmarks espera RGB — convertir desde BGR (formato cv2/STATE.rgbs)
         rgb_for_mp = _cv2.cvtColor(rgb.astype(np.uint8), _cv2.COLOR_BGR2RGB)
         return _detect_landmarks(rgb_for_mp)
     except Exception as e:

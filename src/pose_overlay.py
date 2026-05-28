@@ -173,42 +173,36 @@ def draw_landmarks_on_images(
     depth: np.ndarray,
 ) -> tuple:
     """
-    Detecta los 33 landmarks y los dibuja sobre RGB y depth.
+    1. Detecta landmarks en la imagen RGB
+    2. Aplica offset de paralaje a las coordenadas
+    3. Dibuja SOLO sobre la imagen de profundidad
 
     Args:
-        rgb_bgr: imagen BGR (H, W, 3) uint8 — formato cv2.imread / STATE.rgbs
+        rgb_bgr: imagen BGR (H, W, 3) — formato cv2.imread
         depth:   mapa de profundidad (H, W) float32 en mm
 
     Returns:
-        (rgb_annotated, depth_annotated, success)
-        rgb_annotated:   BGR con landmarks dibujados
-        depth_annotated: depth coloreado con landmarks dibujados
-        success:         True si se detectaron landmarks
+        (rgb_bgr_original, depth_annotated, success)
     """
     H, W = rgb_bgr.shape[:2]
 
-    # FIX: _detect_landmarks ya convierte BGR→RGB internamente.
-    # Pasar BGR directo evita la doble conversión que impedía detectar personas.
-    landmarks = _detect_landmarks(rgb_bgr.astype(np.uint8))
-    
+    # Paso 1: detectar en RGB (convertir BGR→RGB para MediaPipe)
+    rgb_for_mp = cv2.cvtColor(rgb_bgr.astype(np.uint8), cv2.COLOR_BGR2RGB)
+    landmarks = _detect_landmarks(rgb_for_mp)
     if landmarks is None:
-        return None, None, False
+        return rgb_bgr, _depth_to_bgr(depth), False
 
-    points = _landmarks_to_pixels(landmarks, H, W)
+    # Paso 2: convertir landmarks a píxeles en espacio RGB
+    points_rgb = _landmarks_to_pixels(landmarks, H, W)
 
-    # ── Aplicar offset de paralaje para el depth ─────────────────────────────
-    # Los landmarks se detectaron sobre el RGB. Para dibujarlos sobre el depth
-    # hay que desplazarlos por el paralaje calibrado entre ambas cámaras.
-    H, W = rgb_bgr.shape[:2]
+    # Paso 3: aplicar offset de paralaje → coordenadas en espacio depth
     points_depth = []
-    for (x, y, vis) in points:
+    for (x, y, vis) in points_rgb:
         x_d = max(0, min(W - 1, x + PARALLAX_X))
         y_d = max(0, min(H - 1, y + PARALLAX_Y))
         points_depth.append((x_d, y_d, vis))
 
-    # Dibujar sobre BGR original (RGB sin offset)
-    rgb_annotated   = _draw_on_frame(rgb_bgr.copy(), points)
-    # Dibujar sobre depth con offset de paralaje aplicado
+    # Paso 4: dibujar SOLO sobre la imagen de profundidad
     depth_annotated = _draw_on_frame(_depth_to_bgr(depth), points_depth)
 
-    return rgb_annotated, depth_annotated, True
+    return rgb_bgr, depth_annotated, True
