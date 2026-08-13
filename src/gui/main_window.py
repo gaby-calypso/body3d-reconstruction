@@ -17,7 +17,7 @@ from PyQt5.QtWidgets import (
     QSlider, QLineEdit, QComboBox, QGridLayout, QVBoxLayout,
     QHBoxLayout, QSizePolicy, QFrame, QProgressBar, QMessageBox,
     QFileDialog, QScrollArea, QStackedWidget, QSpinBox, QGroupBox,
-    QTabWidget, QDialog
+    QTabWidget, QDialog, QInputDialog
 )
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt5.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QFont
@@ -39,6 +39,10 @@ TEXT_SEC    = "#5F5E5A"
 TEXT_HINT   = "#888780"
 
 ZONES = ["cuello", "pecho", "brazo", "cintura", "cadera", "muslo", "rodilla"]
+
+# Carpeta raíz del repositorio (main_window.py está en src/gui/, subimos 2 niveles)
+PROJECT_ROOT   = Path(__file__).resolve().parents[2]
+CAPTURES_DIR   = PROJECT_ROOT / "data" / "capturas"
 
 
 # ── Helpers de UI ──────────────────────────────────────────────────────────────
@@ -350,6 +354,15 @@ class Page1Capture(QWidget):
         ll.addWidget(self.btn_cam_start)
         ll.addWidget(self.btn_cam_stop)
 
+        # Selector de la vista a la que se dirige el streaming/captura actual
+        # (relevante cuando hay 2+ vistas seleccionadas: permite apuntar
+        # la cámara a "frontal", luego cambiar a "posterior", etc.)
+        self.cmb_cam_view = QComboBox()
+        self.cmb_cam_view.setStyleSheet(input_style())
+        self.cmb_cam_view.addItems(STATE.view_names)
+        self.cmb_cam_view.currentTextChanged.connect(self._on_cam_view_changed)
+        ll.addWidget(labeled("Vista actual de la cámara", self.cmb_cam_view))
+
         self.btn_capture = btn("Capturar frame", TEAL, TEAL_LIGHT)
         self.btn_capture.setEnabled(False)
         self.btn_capture.clicked.connect(self._capture_frame)
@@ -396,6 +409,17 @@ class Page1Capture(QWidget):
     def _on_n_views_changed(self, idx):
         STATE.set_n_views(idx + 1)
         self._rebuild_view_widgets()
+        # Refrescar el combo de "vista actual de la cámara" con las vistas vigentes
+        if hasattr(self, "cmb_cam_view"):
+            self.cmb_cam_view.blockSignals(True)
+            self.cmb_cam_view.clear()
+            self.cmb_cam_view.addItems(STATE.view_names)
+            self.cmb_cam_view.blockSignals(False)
+            self._current_cam_view = STATE.view_names[0]
+
+    def _on_cam_view_changed(self, name):
+        if name:
+            self._current_cam_view = name
 
     def _rebuild_view_widgets(self):
         while self.center_layout.count():
@@ -411,14 +435,36 @@ class Page1Capture(QWidget):
         outer_grid = QGridLayout(grid_container)
         outer_grid.setSpacing(8)
         outer_grid.setContentsMargins(0,0,0,0)
-        outer_grid.setColumnStretch(0, 1)
-        outer_grid.setColumnStretch(1, 1)
-        outer_grid.setRowStretch(0, 1)
-        outer_grid.setRowStretch(1, 1)
-        positions = [(0,0),(0,1),(1,0),(1,1)]
+
+        # ── Distribución responsiva según número de vistas ──────────────────
+        # 1 vista  -> ocupa toda la pantalla (1x1)
+        # 2 vistas -> apiladas verticalmente, una arriba y otra abajo,
+        #             cada una ocupando todo el ancho disponible (2 filas x 1 col)
+        # 3 vistas -> 2 arriba (mitad y mitad) + 1 abajo ocupando todo el ancho
+        # 4 vistas -> grid 2x2 clásico, todas del mismo tamaño
+        # En todos los casos las filas/columnas usadas se reparten el espacio
+        # por igual (stretch=1) para no desperdiciar pantalla.
+        n = len(STATE.view_names)
+        if n == 1:
+            positions = [(0, 0, 1, 1)]      # row, col, rowspan, colspan
+            n_rows, n_cols = 1, 1
+        elif n == 2:
+            positions = [(0, 0, 1, 1), (1, 0, 1, 1)]
+            n_rows, n_cols = 2, 1
+        elif n == 3:
+            positions = [(0, 0, 1, 1), (0, 1, 1, 1), (1, 0, 1, 2)]
+            n_rows, n_cols = 2, 2
+        else:  # n == 4
+            positions = [(0, 0, 1, 1), (0, 1, 1, 1), (1, 0, 1, 1), (1, 1, 1, 1)]
+            n_rows, n_cols = 2, 2
+
+        for r in range(n_rows):
+            outer_grid.setRowStretch(r, 1)
+        for c in range(n_cols):
+            outer_grid.setColumnStretch(c, 1)
 
         for idx, name in enumerate(STATE.view_names):
-            row_g, col_g = positions[idx]
+            row_g, col_g, rspan, cspan = positions[idx]
 
             group = QGroupBox(name.replace("_"," ").capitalize())
             group.setStyleSheet(f"""
@@ -502,13 +548,10 @@ class Page1Capture(QWidget):
 
             gl.addLayout(sgrid)
 
+            group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             self._view_widgets[name] = {"rgb": w_rgb, "depth": w_dep}
             self._roi_sliders[name]  = sliders
-            outer_grid.addWidget(group, row_g, col_g)
-
-        for i in range(len(STATE.view_names), 4):
-            row_g, col_g = positions[i]
-            outer_grid.addWidget(QWidget(), row_g, col_g)
+            outer_grid.addWidget(group, row_g, col_g, rspan, cspan)
 
         self.center_layout.addWidget(grid_container, stretch=1)
 
@@ -547,7 +590,8 @@ class Page1Capture(QWidget):
         self.btn_cam_stop.setEnabled(True)
         self.btn_capture.setEnabled(True)
         self.lbl_status.setText(f"Cámara activa — {mode}")
-        self._current_cam_view = STATE.view_names[0]
+        # Respeta la vista que el usuario ya tenía seleccionada en el combo
+        self._current_cam_view = self.cmb_cam_view.currentText() or STATE.view_names[0]
 
     def _stop_camera(self):
         self.timer.stop()
@@ -561,9 +605,13 @@ class Page1Capture(QWidget):
         if not self.cam: return
         try:
             rgb, depth = self.cam.get_frames()
+            # Colormap de profundidad para visualización en vivo (antes esto
+            # nunca se calculaba ni se mostraba, por eso solo se veía el RGB)
+            depth_vis = self.cam.get_depth_colormap(depth)
             name = getattr(self, "_current_cam_view", STATE.view_names[0])
             if name in self._view_widgets:
                 self._view_widgets[name]["rgb"].set_image_array(rgb)
+                self._view_widgets[name]["depth"].set_image_array(depth_vis)
             self._last_cam_rgb   = rgb
             self._last_cam_depth = depth
         except Exception as e:
@@ -578,7 +626,55 @@ class Page1Capture(QWidget):
         STATE.rgbs[name]   = rgb
         STATE.depths[name] = depth
         self._update_overlay(name)
-        self.lbl_status.setText(f"Frame {name} capturado ✓")
+
+        # ── Pedir nombre y guardar en disco ─────────────────────────────────
+        # Se guardan ambas imágenes (RGB + Depth) dentro de una carpeta,
+        # en data/capturas/<nombre>/, dentro del propio repositorio.
+        folder_name, ok = QInputDialog.getText(
+            self,
+            "Guardar captura",
+            f"Nombre de la carpeta para guardar la captura de '{name}'\n"
+            f"(se guardará en: {CAPTURES_DIR}):",
+            text=name
+        )
+        if ok and folder_name.strip():
+            try:
+                saved_dir = self._save_capture_to_disk(
+                    name, rgb, depth, folder_name.strip()
+                )
+                self.lbl_status.setText(
+                    f"Frame {name} capturado ✓  —  guardado en {saved_dir}"
+                )
+            except Exception as e:
+                self.lbl_status.setText(f"Frame {name} capturado, pero falló el guardado: {e}")
+        else:
+            self.lbl_status.setText(f"Frame {name} capturado ✓ (no se guardó en disco)")
+
+    def _save_capture_to_disk(self, view_name, rgb, depth, folder_name):
+        """
+        Guarda el par RGB + Depth de una captura dentro de:
+            <repositorio>/data/capturas/<folder_name>/
+
+        Archivos generados:
+            <view_name>_rgb.png        → imagen a color
+            <view_name>_depth.npy      → profundidad cruda en metros (float32)
+            <view_name>_depth_vis.png  → colormap de profundidad (solo para revisar visualmente)
+
+        Devuelve la ruta de la carpeta donde se guardó.
+        """
+        out_dir = CAPTURES_DIR / folder_name
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        rgb_path   = out_dir / f"{view_name}_rgb.png"
+        depth_path = out_dir / f"{view_name}_depth.npy"
+        cv2.imwrite(str(rgb_path), rgb)
+        np.save(str(depth_path), depth)
+
+        if self.cam is not None:
+            depth_vis = self.cam.get_depth_colormap(depth)
+            cv2.imwrite(str(out_dir / f"{view_name}_depth_vis.png"), depth_vis)
+
+        return out_dir
 
     def _reset_pipeline_state(self):
         """Limpia el estado derivado para que el pipeline se pueda re-ejecutar."""
@@ -1179,11 +1275,32 @@ class Page2Measurements(QWidget):
         grid = QGridLayout(grid_container)
         grid.setSpacing(8)
 
-        positions = [(0,0), (0,1), (1,0), (1,1)]
+        # Misma distribución responsiva usada en la página de Captura:
+        # 1 vista = pantalla completa, 2 = arriba/abajo, 3 = 2 arriba + 1 abajo
+        # ocupando todo el ancho, 4 = grid 2x2.
+        n_views_count = len(STATE.view_names)
+        if n_views_count == 1:
+            positions = [(0, 0, 1, 1)]
+            grid_rows, grid_cols = 1, 1
+        elif n_views_count == 2:
+            positions = [(0, 0, 1, 1), (1, 0, 1, 1)]
+            grid_rows, grid_cols = 2, 1
+        elif n_views_count == 3:
+            positions = [(0, 0, 1, 1), (0, 1, 1, 1), (1, 0, 1, 2)]
+            grid_rows, grid_cols = 2, 2
+        else:
+            positions = [(0, 0, 1, 1), (0, 1, 1, 1), (1, 0, 1, 1), (1, 1, 1, 1)]
+            grid_rows, grid_cols = 2, 2
+
+        for r in range(grid_rows):
+            grid.setRowStretch(r, 1)
+        for c in range(grid_cols):
+            grid.setColumnStretch(c, 1)
 
         for i, name in enumerate(STATE.view_names):
-            row, col = positions[i]
+            row, col, rspan, cspan = positions[i]
             cell = QWidget()
+            cell.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             cl   = QVBoxLayout(cell); cl.setContentsMargins(0,0,0,0); cl.setSpacing(4)
 
             lbl = section_label(name.replace("_"," ").capitalize())
@@ -1209,7 +1326,7 @@ class Page2Measurements(QWidget):
             btn_mark.clicked.connect(_make_cb(name))
             cl.addWidget(btn_mark)
 
-            grid.addWidget(cell, row, col)
+            grid.addWidget(cell, row, col, rspan, cspan)
 
             depth = STATE.depths.get(name)
             if depth is not None:
@@ -1219,11 +1336,6 @@ class Page2Measurements(QWidget):
                     mask_v = (depth > 300) & (depth < 4000)
                     d_norm[mask_v] = ((depth[mask_v]-valid.min())/(valid.max()-valid.min())*255).astype(np.uint8)
                     w_dep.set_image_array(cv2.applyColorMap(d_norm, cv2.COLORMAP_PLASMA))
-
-        n = len(STATE.view_names)
-        for i in range(n, 4):
-            row, col = positions[i]
-            grid.addWidget(QWidget(), row, col)
 
         self.img_layout.addWidget(grid_container, stretch=1)
 
