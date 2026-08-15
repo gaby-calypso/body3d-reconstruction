@@ -9,12 +9,15 @@ Uso:
 
 import sys
 from PyQt5.QtWidgets import QApplication
-from src.gui.main_window import MainWindow
+from PyQt5.QtGui import QFont
+from src.gui.main_window import MainWindow, FONT_FAMILY
 
 
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Body3D Reconstruction")
+    app.setStyle("Fusion")  # base consistente entre plataformas para que la QSS se vea igual en todos lados
+    app.setFont(QFont(FONT_FAMILY.split(",")[0].strip(' "'), 10))
     window = MainWindow()
     window.show()
     sys.exit(app.exec_())

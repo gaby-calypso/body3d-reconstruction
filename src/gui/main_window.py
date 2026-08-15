@@ -21,22 +21,39 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt5.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QFont
+from PyQt5.QtWidgets import QGraphicsDropShadowEffect
 
 # ── Paleta ─────────────────────────────────────────────────────────────────────
-TEAL        = "#0F6E56"
-TEAL_LIGHT  = "#E1F5EE"
-CORAL       = "#993C1D"
-CORAL_LIGHT = "#FAECE7"
-PURPLE      = "#534AB7"
-PURPLE_LIGHT= "#EEEDFE"
-BLUE        = "#378ADD"
-BG_MAIN     = "#F5F5F3"
-BG_PANEL    = "#FFFFFF"
-BG_CARD     = "#F1EFE8"
-BORDER      = "#D3D1C7"
-TEXT_PRI    = "#2C2C2A"
-TEXT_SEC    = "#5F5E5A"
-TEXT_HINT   = "#888780"
+# Paleta clínico-profesional: superficies frías y neutras, acentos con
+# significado semántico consistente en toda la app (ver USO más abajo).
+TEAL          = "#0E7C66"   # acciones principales / éxito
+TEAL_LIGHT    = "#E3F5F0"
+TEAL_DARK     = "#0A5D4C"
+CORAL         = "#C2410C"   # detener / cancelar / advertencia
+CORAL_LIGHT   = "#FBEAE3"
+PURPLE        = "#5B4FE0"   # navegación hacia adelante
+PURPLE_LIGHT  = "#EEECFD"
+BLUE          = "#2969C9"   # acciones de IA (landmarks / SMPL)
+BLUE_LIGHT    = "#E7F0FC"
+
+BG_MAIN       = "#F3F5F8"   # fondo general de la ventana
+BG_PANEL      = "#FFFFFF"   # tarjetas / paneles elevados
+BG_CARD       = "#F1F3F7"   # inputs y superficies internas
+BG_CARD_HOVER = "#E7EAF0"
+BORDER        = "#E1E5EB"
+BORDER_STRONG = "#C7CDD6"
+TEXT_PRI      = "#171A21"
+TEXT_SEC      = "#5B6270"
+TEXT_HINT     = "#9AA1AC"
+TEXT_ON_DARK  = "#FFFFFF"
+
+SUCCESS = TEAL
+DANGER  = CORAL
+INFO    = BLUE
+
+RADIUS    = 10
+RADIUS_SM = 7
+FONT_FAMILY = '"Segoe UI", "Inter", "Helvetica Neue", Arial, sans-serif'
 
 ZONES = ["cuello", "pecho", "brazo", "cintura", "cadera", "muslo", "rodilla"]
 
@@ -46,38 +63,90 @@ CAPTURES_DIR   = PROJECT_ROOT / "data" / "capturas"
 
 
 # ── Helpers de UI ──────────────────────────────────────────────────────────────
+def _shade(hex_color, factor):
+    """Aclara (factor>1) u oscurece (factor<1) un color hex conservando el tono."""
+    c = QColor(hex_color)
+    h, s, l, a = c.getHsl()
+    l = max(0, min(255, int(round(l * factor))))
+    c.setHsl(h, s, l, a)
+    return c.name()
+
+
 def hline():
-    f = QFrame(); f.setFrameShape(QFrame.HLine)
-    f.setStyleSheet(f"color:{BORDER};"); return f
+    f = QFrame(); f.setFrameShape(QFrame.HLine); f.setFixedHeight(1)
+    f.setStyleSheet(f"background:{BORDER};border:none;"); return f
 
 def vline():
     f = QFrame(); f.setFrameShape(QFrame.VLine)
-    f.setFixedWidth(1); f.setStyleSheet(f"color:{BORDER};"); return f
+    f.setFixedWidth(1); f.setStyleSheet(f"background:{BORDER};border:none;"); return f
 
 def section_label(text):
-    l = QLabel(text)
-    l.setStyleSheet(f"font-size:11px;font-weight:500;color:{TEXT_SEC};")
+    l = QLabel(text.upper())
+    l.setStyleSheet(
+        f"font-size:11px;font-weight:600;color:{TEXT_HINT};letter-spacing:0.6px;"
+    )
     return l
 
-def btn(text, fg=TEXT_PRI, bg=BG_CARD):
+def btn(text, fg=TEXT_PRI, bg=BG_CARD, variant="soft"):
+    """Botón de la app.
+
+    variant="soft"  → superficie tenue con texto de color (estilo por defecto,
+                        usado para acciones secundarias/contextuales).
+    variant="solid" → botón sólido relleno de color, para la acción principal
+                        de cada pantalla (mayor peso visual).
+    """
     b = QPushButton(text)
-    b.setStyleSheet(f"""
-        QPushButton{{background:{bg};color:{fg};border:0.5px solid {fg};
-            border-radius:6px;padding:6px 12px;font-size:12px;}}
-        QPushButton:disabled{{background:{BG_CARD};color:{TEXT_HINT};border-color:{BORDER};}}
-        QPushButton:hover{{opacity:0.85;}}
-    """)
+    if variant == "solid":
+        base   = bg if bg != BG_CARD else fg
+        hover  = _shade(base, 0.88)
+        press  = _shade(base, 0.78)
+        b.setStyleSheet(f"""
+            QPushButton{{background:{base};color:{TEXT_ON_DARK};border:none;
+                border-radius:{RADIUS_SM}px;padding:9px 10px;font-size:13px;font-weight:600;}}
+            QPushButton:hover{{background:{hover};}}
+            QPushButton:pressed{{background:{press};}}
+            QPushButton:disabled{{background:{BORDER};color:{TEXT_HINT};}}
+        """)
+    else:
+        hover = _shade(bg, 0.94)
+        press = _shade(bg, 0.88)
+        b.setStyleSheet(f"""
+            QPushButton{{background:{bg};color:{fg};border:1px solid transparent;
+                border-radius:{RADIUS_SM}px;padding:8px 10px;font-size:13px;font-weight:600;}}
+            QPushButton:hover{{background:{hover};}}
+            QPushButton:pressed{{background:{press};}}
+            QPushButton:disabled{{background:{BG_CARD};color:{TEXT_HINT};border-color:{BORDER};}}
+        """)
+    b.setCursor(Qt.PointingHandCursor)
+    b.setMinimumHeight(34)
     return b
 
 def input_style():
-    return (f"background:{BG_CARD};border:0.5px solid {BORDER};"
-            f"border-radius:6px;padding:4px 8px;font-size:12px;color:{TEXT_PRI};")
+    return (f"QWidget{{background:{BG_CARD};border:1px solid {BORDER};"
+            f"border-radius:{RADIUS_SM}px;padding:5px 10px;font-size:14px;color:{TEXT_PRI};}}"
+            f"QWidget:hover{{border-color:{BORDER_STRONG};}}"
+            f"QWidget:focus{{border-color:{TEAL};background:{BG_PANEL};}}")
 
 def labeled(label_text, widget):
     c = QWidget(); l = QVBoxLayout(c)
-    l.setContentsMargins(0,0,0,0); l.setSpacing(2)
-    lb = QLabel(label_text); lb.setStyleSheet(f"font-size:11px;color:{TEXT_SEC};")
+    l.setContentsMargins(0,0,0,0); l.setSpacing(4)
+    lb = QLabel(label_text); lb.setStyleSheet(f"font-size:12px;color:{TEXT_SEC};font-weight:500;")
     l.addWidget(lb); l.addWidget(widget); return c
+
+def card_panel(radius=RADIUS, bg=BG_PANEL, border=True):
+    """Estilo de tarjeta elevada reutilizable para los paneles principales."""
+    b = f"border:1px solid {BORDER};" if border else "border:none;"
+    return f"background:{bg};border-radius:{radius}px;{b}"
+
+def elevate(widget, blur=24, y_offset=4, alpha=28):
+    """Aplica una sombra suave a un panel/tarjeta para dar sensación de profundidad."""
+    shadow = QGraphicsDropShadowEffect(widget)
+    shadow.setBlurRadius(blur)
+    shadow.setXOffset(0)
+    shadow.setYOffset(y_offset)
+    shadow.setColor(QColor(23, 26, 33, alpha))
+    widget.setGraphicsEffect(shadow)
+    return widget
 
 
 # ── Estado compartido ──────────────────────────────────────────────────────────
@@ -296,8 +365,10 @@ class Page1Capture(QWidget):
         root.setContentsMargins(12,12,12,12)
         root.setSpacing(10)
 
-        left = QWidget(); left.setFixedWidth(260)
-        left.setStyleSheet(f"background:{BG_PANEL};border-radius:8px;")
+        left = QWidget(); left.setFixedWidth(284)
+        left.setStyleSheet(card_panel())
+
+        elevate(left, blur=20, y_offset=2, alpha=10)
         ll = QVBoxLayout(left)
         ll.setContentsMargins(12,12,12,12); ll.setSpacing(8)
 
@@ -338,7 +409,7 @@ class Page1Capture(QWidget):
         bf_row = QHBoxLayout()
         self.slider_bf = QSlider(Qt.Horizontal); self.slider_bf.setRange(5,45); self.slider_bf.setValue(25)
         self.lbl_bf = QLabel("25%"); self.lbl_bf.setFixedWidth(32)
-        self.lbl_bf.setStyleSheet(f"font-size:12px;color:{TEXT_PRI};")
+        self.lbl_bf.setStyleSheet(f"font-size:14px;color:{TEXT_PRI};")
         self.slider_bf.valueChanged.connect(lambda v: self.lbl_bf.setText(f"{v}%"))
         bf_row.addWidget(self.slider_bf); bf_row.addWidget(self.lbl_bf)
         ll.addWidget(labeled("% grasa corporal", QWidget()))
@@ -374,18 +445,18 @@ class Page1Capture(QWidget):
 
         ll.addWidget(hline())
 
-        self.btn_landmarks_p1 = btn("Detectar landmarks (MediaPipe)", BLUE, "#E6F1FB")
+        self.btn_landmarks_p1 = btn("Detectar landmarks (MediaPipe)", BLUE, BLUE_LIGHT)
         self.btn_landmarks_p1.clicked.connect(self._detect_landmarks_p1)
         ll.addWidget(self.btn_landmarks_p1)
 
         self.lbl_status = QLabel("En espera")
-        self.lbl_status.setStyleSheet(f"font-size:11px;color:{TEXT_HINT};")
+        self.lbl_status.setStyleSheet(f"font-size:13px;color:{TEXT_HINT};")
         self.lbl_status.setWordWrap(True)
         ll.addWidget(self.lbl_status)
 
         ll.addStretch()
 
-        self.btn_next = btn("Continuar a Mediciones →", PURPLE, PURPLE_LIGHT)
+        self.btn_next = btn("Continuar a Mediciones →", PURPLE, PURPLE, variant="solid")
         self.btn_next.clicked.connect(self._save_patient_and_next)
         ll.addWidget(self.btn_next)
 
@@ -468,13 +539,15 @@ class Page1Capture(QWidget):
 
             group = QGroupBox(name.replace("_"," ").capitalize())
             group.setStyleSheet(f"""
-                QGroupBox{{background:{BG_PANEL};border:0.5px solid {BORDER};
-                    border-radius:8px;margin-top:8px;font-size:11px;font-weight:500;}}
-                QGroupBox::title{{subcontrol-origin:margin;left:8px;padding:0 3px;}}
+                QGroupBox{{background:{BG_CARD};border:1px solid {BORDER};
+                    border-radius:{RADIUS_SM}px;margin-top:10px;font-size:13px;
+                    font-weight:700;color:{TEXT_PRI};}}
+                QGroupBox::title{{subcontrol-origin:margin;left:10px;top:-2px;
+                    padding:0 6px;background:{BG_CARD};color:{TEAL_DARK};}}
             """)
             gl = QVBoxLayout(group)
-            gl.setContentsMargins(6,10,6,6)
-            gl.setSpacing(4)
+            gl.setContentsMargins(8,14,8,8)
+            gl.setSpacing(6)
 
             img_row = QHBoxLayout()
             img_row.setSpacing(4)
@@ -489,12 +562,12 @@ class Page1Capture(QWidget):
 
             rgb_col = QVBoxLayout()
             rgb_lbl = QLabel("RGB")
-            rgb_lbl.setStyleSheet(f"font-size:9px;color:{TEXT_HINT};")
+            rgb_lbl.setStyleSheet(f"font-size:11px;color:{TEXT_HINT};")
             rgb_col.setSpacing(1); rgb_col.addWidget(rgb_lbl); rgb_col.addWidget(w_rgb)
 
             dep_col = QVBoxLayout()
             dep_lbl = QLabel("Depth")
-            dep_lbl.setStyleSheet(f"font-size:9px;color:{TEXT_HINT};")
+            dep_lbl.setStyleSheet(f"font-size:11px;color:{TEXT_HINT};")
             dep_col.setSpacing(1); dep_col.addWidget(dep_lbl); dep_col.addWidget(w_dep)
 
             img_row.addLayout(rgb_col)
@@ -520,13 +593,13 @@ class Page1Capture(QWidget):
 
             for row_i, (label_txt, key, val, lo, hi) in enumerate(params_def):
                 lbl = QLabel(label_txt)
-                lbl.setStyleSheet(f"font-size:9px;color:{TEXT_SEC};min-width:32px;")
+                lbl.setStyleSheet(f"font-size:11px;color:{TEXT_SEC};min-width:32px;")
                 sl  = QSlider(Qt.Horizontal)
                 sl.setRange(lo, hi); sl.setValue(val)
                 sl.setFixedHeight(16)
                 val_lbl = QLabel(str(val))
                 val_lbl.setFixedWidth(28)
-                val_lbl.setStyleSheet(f"font-size:9px;color:{TEXT_PRI};")
+                val_lbl.setStyleSheet(f"font-size:11px;color:{TEXT_PRI};")
 
                 def _make_cb(k, vl, nm):
                     def cb(v):
@@ -876,7 +949,7 @@ class ZoneMarkerDialog(QDialog):
         self.lbl_instr = QLabel("")
         self.lbl_instr.setFixedHeight(36)
         self.lbl_instr.setStyleSheet(
-            f"font-size:13px;font-weight:500;padding:6px;"
+            f"font-size:15px;font-weight:500;padding:6px;"
             f"border-radius:6px;background:{BG_CARD};color:{TEXT_PRI};"
         )
         ll.addWidget(self.lbl_instr)
@@ -884,7 +957,7 @@ class ZoneMarkerDialog(QDialog):
         # Solo canvas depth — interactivo para marcar zonas
         dep_col = QVBoxLayout(); dep_col.setSpacing(2)
         dep_title = QLabel("Depth")
-        dep_title.setStyleSheet(f"font-size:10px;color:{TEXT_HINT};")
+        dep_title.setStyleSheet(f"font-size:12px;color:{TEXT_HINT};")
         ll.addWidget(dep_title)
 
         # canvas es el depth — interactivo para marcar zonas con clic
@@ -900,7 +973,9 @@ class ZoneMarkerDialog(QDialog):
 
         right = QWidget()
         right.setFixedWidth(340)
-        right.setStyleSheet(f"background:{BG_PANEL};border-radius:8px;")
+        right.setStyleSheet(card_panel())
+
+        elevate(right, blur=20, y_offset=2, alpha=10)
         rl = QVBoxLayout(right)
         rl.setContentsMargins(12,12,12,12); rl.setSpacing(8)
 
@@ -923,12 +998,12 @@ class ZoneMarkerDialog(QDialog):
         for label_txt, key, val, lo, hi in params:
             row = QHBoxLayout()
             lbl = QLabel(label_txt)
-            lbl.setStyleSheet(f"font-size:10px;color:{TEXT_SEC};min-width:48px;")
+            lbl.setStyleSheet(f"font-size:12px;color:{TEXT_SEC};min-width:48px;")
             sl  = QSlider(Qt.Horizontal)
             sl.setRange(lo, hi); sl.setValue(val)
             vl  = QLabel(str(val))
             vl.setFixedWidth(28)
-            vl.setStyleSheet(f"font-size:10px;color:{TEXT_PRI};")
+            vl.setStyleSheet(f"font-size:12px;color:{TEXT_PRI};")
             def _cb(v, k=key, vlbl=vl):
                 vlbl.setText(str(v))
                 if k in ("x1","x2"):
@@ -957,10 +1032,10 @@ class ZoneMarkerDialog(QDialog):
             dot.setFixedSize(12, 12)
             dot.setStyleSheet(f"background:rgb({c[0]},{c[1]},{c[2]});border-radius:6px;")
             lbl = QLabel(z)
-            lbl.setStyleSheet(f"font-size:11px;color:{TEXT_SEC};")
+            lbl.setStyleSheet(f"font-size:13px;color:{TEXT_SEC};")
             status = QLabel("✓" if z in self.zone_rects else "○")
             status.setStyleSheet(
-                f"font-size:11px;color:{'#0F6E56' if z in self.zone_rects else TEXT_HINT};"
+                f"font-size:13px;color:{TEAL if z in self.zone_rects else TEXT_HINT};font-weight:700;"
             )
             row.addWidget(dot); row.addWidget(lbl); row.addStretch()
             row.addWidget(status)
@@ -970,7 +1045,7 @@ class ZoneMarkerDialog(QDialog):
         rl.addWidget(hline())
         rl.addStretch()
 
-        btn_landmarks = btn("Detectar landmarks (MediaPipe)", BLUE, "#E6F1FB")
+        btn_landmarks = btn("Detectar landmarks (MediaPipe)", BLUE, BLUE_LIGHT)
         btn_landmarks.clicked.connect(self._detect_landmarks)
         rl.addWidget(btn_landmarks)
 
@@ -1064,7 +1139,7 @@ class ZoneMarkerDialog(QDialog):
                    f"{'clic esquina inferior-derecha' if self.first_pt else 'clic esquina superior-izquierda'}")
             self.lbl_instr.setText(msg)
             self.lbl_instr.setStyleSheet(
-                f"font-size:13px;font-weight:500;padding:6px;border-radius:6px;"
+                f"font-size:15px;font-weight:500;padding:6px;border-radius:6px;"
                 f"background:rgb({max(0,c[0]-180)},{max(0,c[1]-180)},{max(0,c[2]-180)});"
                 f"color:rgb({c[0]},{c[1]},{c[2]});"
             )
@@ -1073,17 +1148,17 @@ class ZoneMarkerDialog(QDialog):
                 f"Todas marcadas ({len(self.zone_rects)}) — presiona Guardar"
             )
             self.lbl_instr.setStyleSheet(
-                f"font-size:13px;font-weight:500;padding:6px;"
+                f"font-size:15px;font-weight:500;padding:6px;"
                 f"border-radius:6px;background:{TEAL_LIGHT};color:{TEAL};"
             )
 
         for z, lbl in self._zone_list_labels.items():
             if z in self.zone_rects:
                 lbl.setText("✓")
-                lbl.setStyleSheet(f"font-size:11px;color:#0F6E56;font-weight:500;")
+                lbl.setStyleSheet(f"font-size:13px;color:{TEAL};font-weight:500;")
             else:
                 lbl.setText("○")
-                lbl.setStyleSheet(f"font-size:11px;color:{TEXT_HINT};")
+                lbl.setStyleSheet(f"font-size:13px;color:{TEXT_HINT};")
 
     def _on_click(self, e):
         if e.button() != Qt.LeftButton:
@@ -1196,8 +1271,10 @@ class Page2Measurements(QWidget):
         root.setContentsMargins(12,12,12,12)
         root.setSpacing(10)
 
-        left = QWidget(); left.setFixedWidth(260)
-        left.setStyleSheet(f"background:{BG_PANEL};border-radius:8px;")
+        left = QWidget(); left.setFixedWidth(284)
+        left.setStyleSheet(card_panel())
+
+        elevate(left, blur=20, y_offset=2, alpha=10)
         ll = QVBoxLayout(left)
         ll.setContentsMargins(12,12,12,12); ll.setSpacing(6)
 
@@ -1208,30 +1285,30 @@ class Page2Measurements(QWidget):
         self._meas_labels = {}
         for i, zone in enumerate(ZONES):
             z_lbl = QLabel(zone.capitalize())
-            z_lbl.setStyleSheet(f"font-size:11px;color:{TEXT_SEC};")
+            z_lbl.setStyleSheet(f"font-size:13px;color:{TEXT_SEC};")
             v_lbl = QLabel("— cm")
-            v_lbl.setStyleSheet(f"font-size:12px;font-weight:500;color:{TEXT_PRI};")
+            v_lbl.setStyleSheet(f"font-size:14px;font-weight:500;color:{TEXT_PRI};")
             self.meas_grid.addWidget(z_lbl, i, 0)
             self.meas_grid.addWidget(v_lbl, i, 1)
             self._meas_labels[zone] = v_lbl
         ll.addLayout(self.meas_grid)
 
         self.lbl_height = QLabel("Altura: — cm")
-        self.lbl_height.setStyleSheet(f"font-size:11px;color:{TEXT_SEC};margin-top:4px;")
+        self.lbl_height.setStyleSheet(f"font-size:13px;color:{TEXT_SEC};margin-top:4px;")
         ll.addWidget(self.lbl_height)
 
         ll.addWidget(hline())
 
-        self.btn_run = btn("Ejecutar pipeline", TEAL, TEAL_LIGHT)
+        self.btn_run = btn("Ejecutar pipeline", TEAL, TEAL, variant="solid")
         self.btn_run.clicked.connect(self._run_pipeline)
         ll.addWidget(self.btn_run)
 
-        self.btn_landmarks_p2 = btn("Detectar landmarks (MediaPipe)", BLUE, "#E6F1FB")
+        self.btn_landmarks_p2 = btn("Detectar landmarks (MediaPipe)", BLUE, BLUE_LIGHT)
         self.btn_landmarks_p2.clicked.connect(self._detect_landmarks_p2)
         ll.addWidget(self.btn_landmarks_p2)
 
         self.lbl_status = QLabel("Esperando datos...")
-        self.lbl_status.setStyleSheet(f"font-size:11px;color:{TEXT_HINT};")
+        self.lbl_status.setStyleSheet(f"font-size:13px;color:{TEXT_HINT};")
         self.lbl_status.setWordWrap(True)
         ll.addWidget(self.lbl_status)
 
@@ -1239,7 +1316,7 @@ class Page2Measurements(QWidget):
 
         nav = QHBoxLayout()
         self.btn_prev = btn("← Captura", TEXT_SEC, BG_CARD)
-        self.btn_next = btn("Resultados →", PURPLE, PURPLE_LIGHT)
+        self.btn_next = btn("Resultados →", PURPLE, PURPLE, variant="solid")
         self.btn_prev.clicked.connect(self.go_prev.emit)
         self.btn_next.clicked.connect(self.go_next.emit)
         self.btn_next.setEnabled(False)
@@ -1312,7 +1389,7 @@ class Page2Measurements(QWidget):
             w_dep.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
             dep_lbl = QLabel("Depth")
-            dep_lbl.setStyleSheet(f"font-size:9px;color:{TEXT_HINT};")
+            dep_lbl.setStyleSheet(f"font-size:11px;color:{TEXT_HINT};")
             cl.addWidget(dep_lbl)
             cl.addWidget(w_dep, stretch=1)
 
@@ -1589,7 +1666,9 @@ class Page3Results(QWidget):
         root.setSpacing(10)
 
         left = QWidget(); left.setFixedWidth(220)
-        left.setStyleSheet(f"background:{BG_PANEL};border-radius:8px;")
+        left.setStyleSheet(card_panel())
+
+        elevate(left, blur=20, y_offset=2, alpha=10)
         ll = QVBoxLayout(left)
         ll.setContentsMargins(12,12,12,12); ll.setSpacing(6)
 
@@ -1597,17 +1676,19 @@ class Page3Results(QWidget):
         self._zone_cards = {}
         for zone in ["cuello","pecho","cintura","cadera","muslo","rodilla"]:
             card = QWidget()
-            card.setStyleSheet(f"background:{BG_CARD};border-radius:6px;padding:4px;")
-            cl = QVBoxLayout(card); cl.setContentsMargins(6,4,6,4); cl.setSpacing(2)
+            card.setStyleSheet(
+                f"background:{BG_CARD};border:1px solid {BORDER};border-radius:{RADIUS_SM}px;"
+            )
+            cl = QVBoxLayout(card); cl.setContentsMargins(10,8,10,8); cl.setSpacing(4)
             lz = QLabel(zone.capitalize())
-            lz.setStyleSheet(f"font-size:10px;color:{TEXT_SEC};")
+            lz.setStyleSheet(f"font-size:12px;color:{TEXT_SEC};font-weight:600;")
             lv = QLabel("—")
-            lv.setStyleSheet(f"font-size:13px;font-weight:500;color:{TEXT_PRI};")
+            lv.setStyleSheet(f"font-size:16px;font-weight:700;color:{TEXT_PRI};")
             bar = QProgressBar(); bar.setRange(0,100); bar.setValue(50)
-            bar.setTextVisible(False); bar.setFixedHeight(4)
+            bar.setTextVisible(False); bar.setFixedHeight(5)
             bar.setStyleSheet(f"""
                 QProgressBar{{background:{BORDER};border-radius:2px;border:none;}}
-                QProgressBar::chunk{{background:{CORAL};border-radius:2px;}}
+                QProgressBar::chunk{{background:{TEAL};border-radius:2px;}}
             """)
             cl.addWidget(lz); cl.addWidget(lv); cl.addWidget(bar)
             self._zone_cards[zone] = {"val": lv, "bar": bar}
@@ -1615,7 +1696,7 @@ class Page3Results(QWidget):
 
         ll.addWidget(hline())
 
-        self.btn_run_smpl = btn("Comparar con SMPL", TEAL, TEAL_LIGHT)
+        self.btn_run_smpl = btn("Comparar con SMPL", TEAL, TEAL, variant="solid")
         self.btn_run_smpl.clicked.connect(self._run_smpl)
         ll.addWidget(self.btn_run_smpl)
 
@@ -1624,7 +1705,7 @@ class Page3Results(QWidget):
         ll.addWidget(self.btn_pdf)
 
         self.lbl_status = QLabel("")
-        self.lbl_status.setStyleSheet(f"font-size:11px;color:{TEXT_HINT};")
+        self.lbl_status.setStyleSheet(f"font-size:13px;color:{TEXT_HINT};")
         self.lbl_status.setWordWrap(True)
         ll.addWidget(self.lbl_status)
 
@@ -1644,7 +1725,8 @@ class Page3Results(QWidget):
         self.img_comparison = QLabel("Ejecuta la comparación SMPL para ver resultados")
         self.img_comparison.setAlignment(Qt.AlignCenter)
         self.img_comparison.setStyleSheet(
-            f"background:{BG_CARD};border-radius:8px;color:{TEXT_HINT};font-size:12px;"
+            f"background:{BG_CARD};border:1.5px dashed {BORDER_STRONG};"
+            f"border-radius:{RADIUS}px;color:{TEXT_HINT};font-size:14px;"
         )
         self.img_comparison.setMinimumHeight(300)
         cl.addWidget(self.img_comparison, stretch=2)
@@ -1658,8 +1740,8 @@ class Page3Results(QWidget):
         for ci, h in enumerate(headers):
             hl = QLabel(h)
             hl.setStyleSheet(
-                f"background:{TEXT_PRI};color:white;padding:4px 8px;"
-                f"font-size:11px;font-weight:500;border-radius:3px;"
+                f"background:{TEXT_PRI};color:{TEXT_ON_DARK};padding:7px 10px;"
+                f"font-size:12px;font-weight:700;letter-spacing:0.3px;"
             )
             tl.addWidget(hl, 0, ci)
 
@@ -1670,7 +1752,8 @@ class Page3Results(QWidget):
             for ci in range(4):
                 lbl = QLabel("—")
                 lbl.setStyleSheet(
-                    f"background:{bg};padding:4px 8px;font-size:11px;color:{TEXT_PRI};"
+                    f"background:{bg};padding:7px 10px;font-size:13px;color:{TEXT_PRI};"
+                    f"border-bottom:1px solid {BORDER};"
                 )
                 tl.addWidget(lbl, ri, ci)
                 row_widgets.append(lbl)
@@ -1915,14 +1998,19 @@ class MainWindow(QMainWindow):
         root.setSpacing(0)
 
         nav_bar = QWidget()
-        nav_bar.setFixedHeight(48)
+        nav_bar.setFixedHeight(60)
         nav_bar.setStyleSheet(f"background:{BG_PANEL};border-bottom:1px solid {BORDER};")
+        elevate(nav_bar, blur=16, y_offset=2, alpha=14)
         nb = QHBoxLayout(nav_bar)
-        nb.setContentsMargins(16,0,16,0); nb.setSpacing(0)
+        nb.setContentsMargins(24,0,24,0); nb.setSpacing(0)
+
+        logo = QLabel("◆")
+        logo.setStyleSheet(f"font-size:18px;color:{TEAL};margin-right:10px;")
+        nb.addWidget(logo)
 
         title = QLabel("Body3D Reconstruction")
         title.setStyleSheet(
-            f"font-size:14px;font-weight:500;color:{TEXT_PRI};margin-right:32px;"
+            f"font-size:16px;font-weight:700;color:{TEXT_PRI};margin-right:40px;"
         )
         nb.addWidget(title)
 
@@ -1934,14 +2022,15 @@ class MainWindow(QMainWindow):
         ]):
             tb = QPushButton(label)
             tb.setCheckable(True)
-            tb.setFixedHeight(48)
+            tb.setFixedHeight(60)
+            tb.setCursor(Qt.PointingHandCursor)
             tb.setStyleSheet(f"""
                 QPushButton{{background:transparent;color:{TEXT_SEC};
                     border:none;border-bottom:3px solid transparent;
-                    padding:0 20px;font-size:12px;}}
+                    padding:0 20px;font-size:14px;font-weight:500;}}
                 QPushButton:checked{{color:{color};
-                    border-bottom:3px solid {color};font-weight:500;}}
-                QPushButton:hover:!checked{{color:{TEXT_PRI};}}
+                    border-bottom:3px solid {color};font-weight:700;}}
+                QPushButton:hover:!checked{{color:{TEXT_PRI};background:{BG_MAIN};}}
             """)
             tb.clicked.connect(lambda _, idx=i: self._go_to(idx))
             nb.addWidget(tb)
@@ -1973,13 +2062,49 @@ class MainWindow(QMainWindow):
 
     def _apply_styles(self):
         self.setStyleSheet(f"""
-            QMainWindow{{background:{BG_MAIN};}}
-            QSlider::groove:horizontal{{height:4px;background:{BORDER};border-radius:2px;}}
-            QSlider::handle:horizontal{{width:14px;height:14px;margin:-5px 0;
-                border-radius:7px;background:{TEAL};}}
+            * {{ font-family: {FONT_FAMILY}; }}
+            QMainWindow, QDialog {{ background:{BG_MAIN}; }}
+
+            QSlider::groove:horizontal{{height:5px;background:{BORDER};border-radius:2px;}}
+            QSlider::handle:horizontal{{width:16px;height:16px;margin:-6px 0;
+                border-radius:8px;background:{TEAL};border:2px solid {BG_PANEL};}}
+            QSlider::handle:horizontal:hover{{background:{TEAL_DARK};}}
             QSlider::sub-page:horizontal{{background:{TEAL};border-radius:2px;}}
-            QComboBox{{background:{BG_CARD};border:0.5px solid {BORDER};
-                border-radius:6px;padding:4px 8px;font-size:12px;color:{TEXT_PRI};}}
-            QScrollArea{{border:none;}}
-            QGroupBox{{font-size:12px;}}
+
+            QComboBox{{background:{BG_CARD};border:1px solid {BORDER};
+                border-radius:{RADIUS_SM}px;padding:5px 10px;font-size:14px;color:{TEXT_PRI};}}
+            QComboBox:hover{{border-color:{BORDER_STRONG};}}
+            QComboBox:focus{{border-color:{TEAL};background:{BG_PANEL};}}
+            QComboBox::drop-down{{border:none;width:24px;}}
+            QComboBox QAbstractItemView{{background:{BG_PANEL};border:1px solid {BORDER};
+                border-radius:{RADIUS_SM}px;selection-background-color:{TEAL_LIGHT};
+                selection-color:{TEAL_DARK};padding:4px;outline:none;}}
+
+            QLineEdit, QSpinBox{{background:{BG_CARD};border:1px solid {BORDER};
+                border-radius:{RADIUS_SM}px;padding:5px 10px;font-size:14px;color:{TEXT_PRI};}}
+            QLineEdit:hover, QSpinBox:hover{{border-color:{BORDER_STRONG};}}
+            QLineEdit:focus, QSpinBox:focus{{border-color:{TEAL};background:{BG_PANEL};}}
+
+            QScrollArea{{border:none;background:transparent;}}
+            QGroupBox{{font-size:14px;}}
+
+            QScrollBar:vertical{{background:transparent;width:10px;margin:2px;}}
+            QScrollBar::handle:vertical{{background:{BORDER_STRONG};border-radius:5px;min-height:24px;}}
+            QScrollBar::handle:vertical:hover{{background:{TEXT_HINT};}}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical{{height:0;}}
+            QScrollBar:horizontal{{background:transparent;height:10px;margin:2px;}}
+            QScrollBar::handle:horizontal{{background:{BORDER_STRONG};border-radius:5px;min-width:24px;}}
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal{{width:0;}}
+
+            QToolTip{{background:{TEXT_PRI};color:{TEXT_ON_DARK};border:none;
+                border-radius:6px;padding:6px 10px;font-size:12px;}}
+
+            QMessageBox{{background:{BG_PANEL};}}
+            QMessageBox QLabel{{color:{TEXT_PRI};font-size:14px;}}
+            QMessageBox QPushButton{{background:{TEAL};color:{TEXT_ON_DARK};border:none;
+                border-radius:{RADIUS_SM}px;padding:7px 16px;font-size:13px;font-weight:600;min-width:72px;}}
+            QMessageBox QPushButton:hover{{background:{TEAL_DARK};}}
+
+            QInputDialog QLineEdit{{background:{BG_CARD};border:1px solid {BORDER};
+                border-radius:{RADIUS_SM}px;padding:6px 10px;}}
         """)
