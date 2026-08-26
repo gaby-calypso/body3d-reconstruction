@@ -47,9 +47,16 @@ BAND         = 8   # ±px alrededor del landmark para promediar filas
 
 # Offset de paralaje RGB → Depth (calibrado con calibrate_parallax.py)
 # Los landmarks se detectan en RGB — hay que desplazarlos para que
-# coincidan con las posiciones correctas en el depth
-PARALLAX_X = 27    # píxeles horizontales (opuesto al valor de calibración)
-PARALLAX_Y = -17   # píxeles verticales
+# coincidan con las posiciones correctas en el depth.
+# Calibrado sobre imágenes de referencia de 1280x720 (ver
+# calibrate_parallax.py) — si la imagen real tiene otro tamaño (p.ej.
+# 640x480, resolución típica de la D455 en camera.py), este offset fijo
+# queda desproporcionado y los landmarks terminan "corridos" respecto al
+# cuerpo. _lm_x/_lm_y reescalan el offset al tamaño real de cada imagen.
+PARALLAX_X = 0    # offset RGB→Depth adicional (ver nota en pose_overlay.py:
+PARALLAX_Y = 0    # camera.py ya alinea depth↔color con rs.align, así que
+                   # este offset manual debería ser 0 salvo recalibración)
+_PARALLAX_REF_W, _PARALLAX_REF_H = 1280, 720
 
 
 # ── Configuración por vista ────────────────────────────────────────────────────
@@ -123,7 +130,8 @@ def _lm_y(landmarks: list, idx: int, H: int,
     Si apply_parallax=True aplica el offset RGB→Depth."""
     y = int(landmarks[idx].y * H)
     if apply_parallax:
-        y = max(0, min(H-1, y + PARALLAX_Y))
+        off_y = int(round(PARALLAX_Y * H / _PARALLAX_REF_H))
+        y = max(0, min(H-1, y + off_y))
     return y
 
 
@@ -133,7 +141,8 @@ def _lm_x(landmarks: list, idx: int, W: int,
     Si apply_parallax=True aplica el offset RGB→Depth."""
     x = int(landmarks[idx].x * W)
     if apply_parallax:
-        x = max(0, min(W-1, x + PARALLAX_X))
+        off_x = int(round(PARALLAX_X * W / _PARALLAX_REF_W))
+        x = max(0, min(W-1, x + off_x))
     return x
 
 

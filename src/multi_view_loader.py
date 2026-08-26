@@ -11,6 +11,8 @@ import numpy as np
 import cv2
 from typing import Optional
 
+from src.loader import ensure_millimetres
+
 VIEW_CONFIG = {
     "frontal":     {"angle": 0.0,   "flip_x": False},
     "posterior":   {"angle": 180.0, "flip_x": True},
@@ -45,6 +47,10 @@ def load_view(
         raise ValueError(f"Formato de depth no soportado: {ext}")
 
     depth *= depth_scale
+    # Si depth_scale se dejó en 1.0 y el archivo resulta estar en metros
+    # (típico de capturas viejas o de modo simulación), lo detectamos y
+    # convertimos igual, para no depender de que el usuario lo sepa.
+    depth = ensure_millimetres(depth, source=str(depth_path))
 
     cfg = VIEW_CONFIG.get(view_name, {"angle": 0.0, "flip_x": False})
 

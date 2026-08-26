@@ -29,8 +29,8 @@ class CameraConfig:
     width:      int   = 640
     height:     int   = 480
     fps:        int   = 30
-    depth_min:  float = 0.3    # metros — distancia mínima válida
-    depth_max:  float = 3.0    # metros — distancia máxima válida
+    depth_min:  float = 300.0   # mm — distancia mínima válida (30 cm)
+    depth_max:  float = 3000.0  # mm — distancia máxima válida (3 m)
 
 
 class RealSenseCamera:
@@ -88,7 +88,7 @@ class RealSenseCamera:
 
         Returns:
             rgb   : (H, W, 3) uint8  — imagen BGR (compatible con OpenCV)
-            depth : (H, W)    float32 — profundidad en metros
+            depth : (H, W)    float32 — profundidad en milímetros
                     valores 0.0 indican píxeles sin dato válido
 
         Raises:
@@ -108,7 +108,7 @@ class RealSenseCamera:
         para visualización en la GUI.
 
         Args:
-            depth : (H, W) float32 en metros
+            depth : (H, W) float32 en milímetros
 
         Returns:
             (H, W, 3) uint8 imagen BGR con colormap JET
@@ -214,8 +214,11 @@ class RealSenseCamera:
         rgb   = np.asanyarray(color_frame.get_data())         # (H,W,3) uint8
         depth_raw = np.asanyarray(depth_frame.get_data())     # (H,W)   uint16
 
-        # Convertir a metros y enmascarar valores fuera de rango
-        depth = depth_raw.astype(np.float32) * self._depth_scale
+        # Convertir a milímetros y enmascarar valores fuera de rango
+        # (self._depth_scale de RealSense siempre viene en metros/unidad,
+        #  por eso se multiplica x1000 para quedar en mm como el resto
+        #  del pipeline: segmentation.py, preprocessing.py, main_window.py)
+        depth = depth_raw.astype(np.float32) * self._depth_scale * 1000.0
         depth[(depth < self.config.depth_min) |
               (depth > self.config.depth_max)] = 0.0
 
@@ -228,7 +231,7 @@ class RealSenseCamera:
         Genera frames sintéticos realistas para pruebas sin cámara.
 
         RGB  : fondo gris + silueta humana con textura de piel
-        Depth: elipsoide 3D que simula un cuerpo a ~1.5m de distancia
+        Depth: elipsoide 3D que simula un cuerpo a ~1500 mm de distancia
         """
         self._frame_n += 1
         h, w = self.config.height, self.config.width
@@ -254,13 +257,13 @@ class RealSenseCamera:
         offset = int(3 * np.sin(self._frame_n * 0.05))
         rgb = np.roll(rgb, offset, axis=1)
 
-        # ── Depth sintético ───────────────────────────────────────────────────
+        # ── Depth sintético (en milímetros, igual que el resto del pipeline) ──
         depth = np.zeros((h, w), dtype=np.float32)
 
-        # Fondo a 2.5m
-        depth[:] = 2.5
+        # Fondo a 2500 mm
+        depth[:] = 2500.0
 
-        # Cuerpo: elipsoide a 1.5m con variación por parte
+        # Cuerpo: elipsoide a 1500 mm con variación por parte
         for bx, by, rx, ry, _ in body_parts:
             yy, xx = np.ogrid[:h, :w]
             mask   = ((xx - bx)**2 / max(rx**2, 1) +
@@ -268,15 +271,15 @@ class RealSenseCamera:
             # Profundidad varía como semiesfera (centro más cercano)
             dist_sq = ((xx - bx)**2 / max(rx**2, 1) +
                        (yy - by)**2 / max(ry**2, 1))
-            body_depth = 1.5 + 0.15 * dist_sq
+            body_depth = 1500.0 + 150.0 * dist_sq
             depth[mask] = np.minimum(depth[mask], body_depth[mask])
 
         # Enmascarar valores fuera del rango válido
         depth[(depth < self.config.depth_min) |
               (depth > self.config.depth_max)] = 0.0
 
-        # Añadir ruido gaussiano leve (simula sensor real)
-        noise = np.random.normal(0, 0.005, depth.shape).astype(np.float32)
+        # Añadir ruido gaussiano leve (simula sensor real), en milímetros
+        noise = np.random.normal(0, 5.0, depth.shape).astype(np.float32)
         depth = np.where(depth > 0, depth + noise, depth)
 
         return rgb, depth
@@ -315,7 +318,7 @@ if __name__ == "__main__":
             cv2.putText(
                 combined,
                 f"Frame {frame_count:04d} | "
-                f"Depth centro: {depth[depth.shape[0]//2, depth.shape[1]//2]:.2f}m",
+                f"Depth centro: {depth[depth.shape[0]//2, depth.shape[1]//2]:.0f}mm",
                 (10, 25), cv2.FONT_HERSHEY_SIMPLEX,
                 0.55, (255, 255, 255), 1, cv2.LINE_AA
             )

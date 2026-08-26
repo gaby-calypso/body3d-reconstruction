@@ -123,6 +123,102 @@ def render_segmentation(depth_clean: np.ndarray,
     return fig
 
 
+def render_fused_mesh_snapshot(fused_mesh) -> plt.Figure:
+    """
+    Renderiza el cuerpo 3D ya fusionado (las 4 vistas alineadas con ICP
+    en un solo cuerpo, ver src/multi_view_reconstruction.py:
+    fuse_pointclouds_icp + reconstruct_mesh) desde 2 ángulos.
+
+    A diferencia de render_silhouette_mesh_snapshot (que muestra las 4
+    vistas SEPARADAS, cada una en su propio marco de cámara), esto
+    muestra el resultado de la fusión: un solo cuerpo 3D coherente.
+
+    Args:
+        fused_mesh: o3d.geometry.TriangleMesh en metros, Y-up (salida de
+                    reconstruct_mesh sobre la nube fusionada)
+
+    Returns:
+        figura matplotlib
+    """
+    import matplotlib.tri as mtri
+
+    fig = plt.figure(figsize=(9, 5.5))
+    if fused_mesh is None or len(fused_mesh.vertices) == 0:
+        fig.text(0.5, 0.5, "Sin reconstrucción fusionada disponible",
+                  ha="center", va="center", fontsize=12, color="gray")
+        return fig
+
+    verts = np.asarray(fused_mesh.vertices)
+    tris  = np.asarray(fused_mesh.triangles)
+    fig.suptitle(f"Reconstrucción 3D fusionada — {len(verts):,} vértices",
+                 fontsize=13, fontweight="bold", y=1.02)
+
+    ax1 = fig.add_subplot(121)
+    triang1 = mtri.Triangulation(verts[:, 0], verts[:, 1], tris)
+    ax1.tripcolor(triang1, verts[:, 2], shading="gouraud", cmap="viridis")
+    ax1.set_aspect("equal"); ax1.axis("off")
+    ax1.set_title("Frontal", fontsize=10)
+
+    ax2 = fig.add_subplot(122)
+    triang2 = mtri.Triangulation(verts[:, 2], verts[:, 1], tris)
+    ax2.tripcolor(triang2, verts[:, 0], shading="gouraud", cmap="viridis")
+    ax2.set_aspect("equal"); ax2.axis("off")
+    ax2.set_title("Lateral", fontsize=10)
+
+    plt.tight_layout()
+    return fig
+
+
+def render_silhouette_mesh_snapshot(meshes: dict) -> plt.Figure:
+    """
+    Renderiza la malla 3D reconstruida (silueta exacta desde el depth,
+    ver src/reconstruction.py: build_silhouette_mesh) de cada vista
+    disponible — una por subplot, sombreada por profundidad.
+
+    A diferencia de render_pointcloud_snapshot (que dispersa puntos
+    sueltos y no muestra superficie), esto dibuja la malla triangulada
+    real tal como quedó construida: el contorno de cada subplot es
+    exactamente el contorno de la silueta segmentada de esa vista.
+
+    Args:
+        meshes: dict {view_name: o3d.geometry.TriangleMesh}
+
+    Returns:
+        figura matplotlib
+    """
+    import matplotlib.tri as mtri
+
+    names = [n for n, m in (meshes or {}).items()
+             if m is not None and len(m.vertices) > 0]
+
+    fig_w = max(4, 4.2 * max(1, len(names)))
+    fig = plt.figure(figsize=(fig_w, 5.2))
+
+    if not names:
+        fig.text(0.5, 0.5, "Sin reconstrucción disponible\n"
+                            "(ejecuta el pipeline en la página de Mediciones)",
+                  ha="center", va="center", fontsize=12, color="gray")
+        return fig
+
+    fig.suptitle("Reconstrucción 3D — silueta real (desde el mapa de profundidad)",
+                 fontsize=13, fontweight="bold", y=1.02)
+
+    for i, name in enumerate(names):
+        ax = fig.add_subplot(1, len(names), i + 1)
+        mesh  = meshes[name]
+        verts = np.asarray(mesh.vertices)
+        tris  = np.asarray(mesh.triangles)
+        triang = mtri.Triangulation(verts[:, 0], -verts[:, 1], tris)
+        ax.tripcolor(triang, verts[:, 2], shading="gouraud", cmap="viridis")
+        ax.set_aspect("equal")
+        ax.set_title(f"{name.replace('_',' ').capitalize()} "
+                     f"({len(verts):,} vértices)", fontsize=10)
+        ax.axis("off")
+
+    plt.tight_layout()
+    return fig
+
+
 def render_pointcloud_snapshot(depth_body: np.ndarray) -> plt.Figure:
     """
     Página 3 — Nube de puntos 3D renderizada como imagen estática.

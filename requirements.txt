@@ -7,6 +7,16 @@ opencv-python>=4.7.0
 
 # ── Procesamiento 3D ─────────────────────────────────────────────────────────
 open3d>=0.17.0
+trimesh>=4.0.0          # cálculo de volumen por zona (corte de malla en planos)
+shapely>=2.0.0          # requerido por trimesh para tapar los cortes (cap=True)
+mapbox_earcut>=1.0.0    # motor de triangulación para las tapas del corte
+rtree>=1.0.0            # índice espacial que usa trimesh internamente al
+                         # cortar/tapar mallas — SIN esto, slice_plane falla
+                         # en la mayoría de las zonas con "No module named
+                         # 'rtree'" (visible como "Corte de malla falló para
+                         # zona en Y=[...]" en la consola). Se me pasó
+                         # agregarlo la primera vez — lo probé con rtree ya
+                         # instalado en mi entorno y no quedó reflejado aquí.
 
 # ── Modelo SMPL ───────────────────────────────────────────────────────────────
 smplx>=0.1.28

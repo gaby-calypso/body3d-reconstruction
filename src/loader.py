@@ -21,6 +21,43 @@ import numpy as np
 import cv2
 
 
+# Todo el pipeline (segmentación, ROI, medidas antropométricas) trabaja
+# en milímetros. Sin embargo algunas capturas (modo simulación de
+# camera.py, u otras herramientas) guardan el depth en metros.
+# Un valor realista en milímetros para una persona frente a la cámara
+# está siempre por encima de ~50 (nadie está a 5 cm del sensor), así
+# que si el máximo del array es menor a ese umbral, son metros.
+_METRES_MAX_THRESHOLD = 50.0
+
+
+def ensure_millimetres(depth: np.ndarray, source: str = "") -> np.ndarray:
+    """
+    Normaliza un mapa de profundidad para que quede siempre en milímetros,
+    sin importar en qué unidad se haya guardado originalmente.
+
+    Args:
+        depth:  mapa de profundidad (H, W), cualquier dtype numérico.
+        source: nombre/ruta del archivo, solo para el mensaje informativo.
+
+    Returns:
+        np.ndarray float32 en milímetros.
+    """
+    depth = depth.astype(np.float32)
+
+    finite = depth[np.isfinite(depth)]
+    if finite.size == 0:
+        return depth
+
+    max_val = float(finite.max())
+    if 0 < max_val < _METRES_MAX_THRESHOLD:
+        label = f" en '{source}'" if source else ""
+        print(f"[loader] Profundidad en metros detectada{label} "
+              f"(máximo={max_val:.3f}) → convirtiendo a milímetros (x1000).")
+        depth = depth * 1000.0
+
+    return depth
+
+
 def load_rgb_image(image_path: str | Path) -> np.ndarray:
     """
     Load an RGB image from disk.
@@ -82,7 +119,7 @@ def load_depth_map(depth_path: str | Path) -> np.ndarray:
             "Make sure the .npy file contains a single depth frame."
         )
 
-    return depth.astype(np.float32)
+    return ensure_millimetres(depth, source=str(depth_path))
 
 
 def load_frame(rgb_path: str | Path, depth_path: str | Path) -> dict:

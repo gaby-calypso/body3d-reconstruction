@@ -17,7 +17,7 @@ from PyQt5.QtWidgets import (
     QSlider, QLineEdit, QComboBox, QGridLayout, QVBoxLayout,
     QHBoxLayout, QSizePolicy, QFrame, QProgressBar, QMessageBox,
     QFileDialog, QScrollArea, QStackedWidget, QSpinBox, QGroupBox,
-    QTabWidget, QDialog, QInputDialog
+    QTabWidget, QDialog, QInputDialog, QCheckBox
 )
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt5.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QFont
@@ -158,12 +158,20 @@ class AppState:
         self.rgbs       = {}
         self.depths     = {}
         self.roi_params = {}
+        self.only_neck_mode = False  # True → mediciones y comparación usan
+                                      # exclusivamente la circunferencia del
+                                      # cuello (ver Page2Measurements, checkbox
+                                      # "Solo cuello", y Page3Results._run_smpl)
         self.patient    = {
             "name": "", "sex": "female", "age": 30,
             "weight": 65.0, "height": 1.65, "body_fat": 25.0,
         }
         self.segs         = {}
-        self.pcds         = {}
+        # NOTA: STATE ya no guarda pcds/meshes/fused_pcd/fused_mesh — el
+        # pipeline (Ejecutar pipeline) solo segmenta y mide; la
+        # reconstrucción de malla ahora se genera bajo demanda al
+        # presionar "Comparar con Malla de Referencia" en Resultados
+        # (ver Page3Results._run_smpl), no se guarda en STATE.
         # ── MODIFICACIÓN 1 ─────────────────────────────────────────────────────
         # STATE.measurements ahora guarda el dict completo de extract_measurements
         # Estructura: {zona: {"y_px": int, "circumference_cm": float,
@@ -257,11 +265,9 @@ class PipelineThread(QThread):
             import sys; sys.path.insert(0,".")
             from src.preprocessing       import preprocess_depth
             from src.segmentation        import segment_body
-            from src.reconstruction      import reconstruct_pointcloud
-            from src.multi_view_pipeline import combine_measurements
             from src.reconstruction      import FY
 
-            segs = {}; pcds = {}
+            segs = {}
 
             for name in STATE.view_names:
                 self.progress.emit(f"Procesando {name}...")
@@ -277,12 +283,23 @@ class PipelineThread(QThread):
                     x_min=roi["x1"], x_max=roi["x2"],
                     y_min=roi["y1"], y_max=roi["y2"],
                 )
-                pcd = reconstruct_pointcloud(seg["depth_body"], seg["rgb_body"])
                 segs[name] = seg
-                pcds[name]  = pcd
 
             STATE.segs = segs
-            STATE.pcds  = pcds
+
+            # NOTA: el pipeline de "Ejecutar pipeline" (aquí) solo ubica las
+            # zonas de interés y calcula las medidas antropométricas — ya
+            # NO reconstruye mallas 3D ni las fusiona entre vistas. Eso es
+            # deliberado: la reconstrucción de malla ahora ocurre solo al
+            # presionar "Comparar con Malla de Referencia" en la página de
+            # Resultados (ver Page3Results._run_smpl), y usa un método
+            # distinto (medidas → malla vía reshaper, no fusión ICP de
+            # nubes de puntos), que es más rápido, más confiable y no
+            # depende de que los ángulos de captura de las 4 vistas estén
+            # bien calibrados. La fusión ICP + Poisson que vivía aquí antes
+            # además podía crashear el hilo (error nativo de Open3D/
+            # PoissonRecon 'Failed to close loop' con fusiones de baja
+            # calidad) — quitarla de este paso también resuelve eso.
 
             self.progress.emit("Extrayendo medidas...")
             if "frontal" in segs:
@@ -321,6 +338,13 @@ class PipelineThread(QThread):
 
                 # STATE.measurements guarda el dict completo (no solo circ_cm)
                 # Estructura: {zona: {"y_px", "circumference_cm", "width_mm", ...}}
+                # Si "Solo cuello" está activo, el pipeline no debe medir (ni
+                # mostrar) el resto de zonas — antes se calculaban todas
+                # igual y "Solo cuello" solo afectaba el paso de comparación
+                # con la malla (Página 3), lo cual era confuso: la página
+                # de Mediciones seguía mostrando pecho/cintura/etc.
+                if STATE.only_neck_mode:
+                    meas = {"cuello": meas.get("cuello")}
                 STATE.measurements = meas
 
                 # diag sigue igual para Page3
@@ -442,12 +466,6 @@ class Page1Capture(QWidget):
         self.btn_import = btn("Importar imágenes")
         self.btn_import.clicked.connect(self._import_images)
         ll.addWidget(self.btn_import)
-
-        ll.addWidget(hline())
-
-        self.btn_landmarks_p1 = btn("Detectar landmarks (MediaPipe)", BLUE, BLUE_LIGHT)
-        self.btn_landmarks_p1.clicked.connect(self._detect_landmarks_p1)
-        ll.addWidget(self.btn_landmarks_p1)
 
         self.lbl_status = QLabel("En espera")
         self.lbl_status.setStyleSheet(f"font-size:13px;color:{TEXT_HINT};")
@@ -576,13 +594,43 @@ class Page1Capture(QWidget):
 
             roi = STATE.roi_params[name]
             sliders = {}
-            h_img, w_img = 720, 1280
+            # Usar el tamaño REAL de la imagen cargada para esta vista, no un
+            # valor fijo. Antes se asumía siempre 1280x720 (resolución típica
+            # de RealSense a la que se calibraron los ROI por defecto), pero
+            # si la imagen importada es de otro tamaño (p.ej. 640x480) el
+            # % del slider se traduce a un píxel equivocado: el mínimo de x2
+            # puede terminar más a la izquierda que x1, y el mínimo de y2
+            # queda más abajo de lo que debería, sin dejar subirlo lo
+            # suficiente. Al usar las dimensiones reales, el % siempre
+            # corresponde al píxel correcto sin importar la resolución.
+            _src_img = STATE.rgbs.get(name)
+            if _src_img is None:
+                _src_img = STATE.depths.get(name)
+            if _src_img is not None:
+                h_img, w_img = _src_img.shape[:2]
+            else:
+                h_img, w_img = 480, 640
+
+            # Los valores por defecto de roi_params (x1/x2/y1/y2) fueron
+            # calibrados sobre una imagen de 1280x720. Si la imagen real
+            # cargada tiene otro tamaño, reescalamos esos valores una sola
+            # vez (por vista) para que la caja inicial aparezca en una
+            # posición razonable, en vez de fuera de cuadro.
+            _prev_wh = roi.get("_scaled_wh")
+            if _prev_wh != (w_img, h_img):
+                _ref_w, _ref_h = _prev_wh if _prev_wh else (1280, 720)
+                _sx, _sy = w_img / _ref_w, h_img / _ref_h
+                roi["x1"] = int(roi["x1"] * _sx)
+                roi["x2"] = int(roi["x2"] * _sx)
+                roi["y1"] = int(roi["y1"] * _sy)
+                roi["y2"] = int(roi["y2"] * _sy)
+                roi["_scaled_wh"] = (w_img, h_img)
 
             params_def = [
-                ("x1%",  "x1",   int(roi["x1"]/w_img*100), 0,   60),
-                ("x2%",  "x2",   int(roi["x2"]/w_img*100), 40, 100),
-                ("y1%",  "y1",   int(roi["y1"]/h_img*100), 0,   50),
-                ("y2%",  "y2",   int(roi["y2"]/h_img*100), 50, 100),
+                ("x1%",  "x1",   int(roi["x1"]/w_img*100), 0,   100),
+                ("x2%",  "x2",   int(roi["x2"]/w_img*100), 0,   100),
+                ("y1%",  "y1",   int(roi["y1"]/h_img*100), 0,   100),
+                ("y2%",  "y2",   int(roi["y2"]/h_img*100), 0,   100),
                 ("dMin", "d_min",roi["d_min"]//10,          50, 250),
                 ("dMax", "d_max",roi["d_max"]//10,          50, 400),
             ]
@@ -601,13 +649,13 @@ class Page1Capture(QWidget):
                 val_lbl.setFixedWidth(28)
                 val_lbl.setStyleSheet(f"font-size:11px;color:{TEXT_PRI};")
 
-                def _make_cb(k, vl, nm):
+                def _make_cb(k, vl, nm, w_i=w_img, h_i=h_img):
                     def cb(v):
                         vl.setText(str(v))
                         if k in ("x1","x2"):
-                            STATE.roi_params[nm][k] = int(v/100*1280)
+                            STATE.roi_params[nm][k] = int(v/100*w_i)
                         elif k in ("y1","y2"):
-                            STATE.roi_params[nm][k] = int(v/100*720)
+                            STATE.roi_params[nm][k] = int(v/100*h_i)
                         else:
                             STATE.roi_params[nm][k] = v * 10
                         self._update_overlay(nm)
@@ -754,7 +802,6 @@ class Page1Capture(QWidget):
         STATE.rgbs.clear()
         STATE.depths.clear()
         STATE.segs.clear()
-        STATE.pcds.clear()
         STATE.measurements.clear()
         STATE.diag.clear()
         STATE.pipeline_done = False
@@ -784,8 +831,10 @@ class Page1Capture(QWidget):
             rgb_path   = data_dir / f"{name}_rgb.png"
             depth_path = data_dir / f"{name}_depth.npy"
             if rgb_path.exists() and depth_path.exists():
+                from src.loader import ensure_millimetres
                 STATE.rgbs[name]   = cv2.imread(str(rgb_path))
-                STATE.depths[name] = np.load(str(depth_path)).astype("float32")
+                depth_raw          = np.load(str(depth_path)).astype("float32")
+                STATE.depths[name] = ensure_millimetres(depth_raw, source=str(depth_path))
                 self._view_widgets[name]["rgb"].set_image_array(STATE.rgbs[name])
                 self._update_overlay(name)
                 loaded.append(name)
@@ -809,46 +858,12 @@ class Page1Capture(QWidget):
             )
             STATE.rgbs[name]   = cv2.imread(rgb_path)
             if depth_path:
-                STATE.depths[name] = np.load(depth_path).astype("float32")
+                from src.loader import ensure_millimetres
+                depth_raw           = np.load(depth_path).astype("float32")
+                STATE.depths[name]  = ensure_millimetres(depth_raw, source=depth_path)
             self._view_widgets[name]["rgb"].set_image_array(STATE.rgbs[name])
             self._update_overlay(name)
         self.lbl_status.setText("Importación completada ✓")
-
-    def _detect_landmarks_p1(self):
-        """
-        Botón 'Detectar landmarks' en Página 1.
-        Corre MediaPipe sobre todas las vistas cargadas y actualiza
-        las imágenes RGB y depth con los 33 landmarks dibujados.
-        """
-        from src.pose_overlay import draw_landmarks_on_images
-
-        if not STATE.rgbs:
-            self.lbl_status.setText("Carga imágenes primero.")
-            return
-
-        self.btn_landmarks_p1.setEnabled(False)
-        self.lbl_status.setText("Detectando landmarks...")
-        QApplication.processEvents()
-
-        found_any = False
-        for name in STATE.view_names:
-            rgb   = STATE.rgbs.get(name)
-            depth = STATE.depths.get(name)
-            if rgb is None:
-                continue
-            if depth is None:
-                depth = np.zeros(rgb.shape[:2], dtype=np.float32)
-
-            rgb_ann, depth_ann, ok = draw_landmarks_on_images(rgb, depth)
-
-            if ok and name in self._view_widgets:
-                self._view_widgets[name]["rgb"].set_image_array(rgb_ann)
-                self._view_widgets[name]["depth"].set_image_array(depth_ann)
-                found_any = True
-
-        self.btn_landmarks_p1.setEnabled(True)
-        self.lbl_status.setText("Landmarks detectados ✓" if found_any
-                                 else "No se detectó ninguna persona.")
 
     def _save_patient_and_next(self):
         STATE.patient["name"]     = self.inp_name.text().strip() or "No especificado"
@@ -904,21 +919,38 @@ class ZoneMarkerDialog(QDialog):
         self.mouse_pos      = None
         self._orig_rgb      = image_rgb.copy()
 
-        # Usar depth como imagen base del canvas (en vez del RGB)
+        # Dimensiones de la imagen COMPLETA (no del recorte) — las usan los
+        # sliders ROI del panel derecho, que trabajan en % sobre la imagen
+        # completa para poder ajustar/expandir la zona delimitada.
+        _depth_full = STATE.depths.get(view_name)
+        if _depth_full is not None:
+            self._real_h, self._real_w = _depth_full.shape[:2]
+        else:
+            self._real_h, self._real_w = self._orig_rgb.shape[:2]
+
+        # Recortar a la sección ROI (x1/x2/y1/y2) fijada en Captura — antes
+        # esta ventana siempre mostraba el depth COMPLETO como base, sin
+        # importar la zona delimitada manualmente.
+        self._crop_x1, self._crop_y1, self._crop_x2, self._crop_y2 = \
+            self._compute_crop_bounds()
+
+        # Usar depth (recortado) como imagen base del canvas (en vez del RGB)
         depth_src = STATE.depths.get(view_name)
         if depth_src is not None:
-            valid = depth_src[(depth_src > 300) & (depth_src < 4000)]
-            d_norm = np.zeros_like(depth_src, dtype=np.uint8)
+            depth_crop = depth_src[self._crop_y1:self._crop_y2,
+                                    self._crop_x1:self._crop_x2]
+            valid = depth_crop[(depth_crop > 300) & (depth_crop < 4000)]
+            d_norm = np.zeros_like(depth_crop, dtype=np.uint8)
             if len(valid) > 0:
-                mask_v = (depth_src > 300) & (depth_src < 4000)
-                d_norm[mask_v] = ((depth_src[mask_v]-valid.min())/(valid.max()-valid.min())*255).astype(np.uint8)
+                mask_v = (depth_crop > 300) & (depth_crop < 4000)
+                d_norm[mask_v] = ((depth_crop[mask_v]-valid.min())/(valid.max()-valid.min())*255).astype(np.uint8)
             base_img = cv2.applyColorMap(d_norm, cv2.COLORMAP_PLASMA)
             # Guardar como RGB para consistencia con _orig_rgb
             self._orig_rgb = cv2.cvtColor(base_img, cv2.COLOR_BGR2RGB)
         else:
             self._orig_rgb = image_rgb.copy()
 
-        h, w = self._orig_rgb.shape[:2]
+        h, w = self._orig_rgb.shape[:2]   # dimensiones del RECORTE mostrado
         # Limitar tamaño del canvas para que quepan los botones del panel derecho
         # Máximo 700px ancho y 550px alto
         # El canvas se adapta al espacio disponible — panel derecho ocupa 360px
@@ -936,6 +968,28 @@ class ZoneMarkerDialog(QDialog):
 
         self._build()
         self.setMouseTracking(True)
+
+    def _compute_crop_bounds(self):
+        """
+        (x1,y1,x2,y2) del ROI de self.view_name en coordenadas ABSOLUTAS de
+        la imagen completa, ordenados y recortados a límites válidos.
+        Si no hay depth cargado o el ROI es degenerado, devuelve el
+        rectángulo completo (0,0,W,H).
+        """
+        depth = STATE.depths.get(self.view_name)
+        if depth is None:
+            return (0, 0, self._orig_rgb.shape[1], self._orig_rgb.shape[0])
+        h, w = depth.shape[:2]
+        roi = STATE.roi_params.get(self.view_name)
+        if not roi:
+            return (0, 0, w, h)
+        x1, x2 = sorted((roi["x1"], roi["x2"]))
+        y1, y2 = sorted((roi["y1"], roi["y2"]))
+        x1, x2 = max(0, x1), min(w, x2)
+        y1, y2 = max(0, y1), min(h, y2)
+        if x2 - x1 < 2 or y2 - y1 < 2:
+            return (0, 0, w, h)
+        return (x1, y1, x2, y2)
 
     def _build(self):
         root = QHBoxLayout(self)
@@ -985,13 +1039,16 @@ class ZoneMarkerDialog(QDialog):
         rl.addWidget(section_label("Ajuste ROI y profundidad"))
         roi = STATE.roi_params[self.view_name]
         self._roi_sliders = {}
-        h_img, w_img = 720, 1280
+        # Dimensiones REALES de la imagen (no un valor fijo asumido), para que
+        # el % del slider siempre corresponda al píxel correcto sin importar
+        # la resolución con la que se capturó/importó la imagen.
+        h_img, w_img = self._real_h, self._real_w
 
         params = [
-            ("x1 %",  "x1",   int(roi["x1"]/w_img*100), 0,   60),
-            ("x2 %",  "x2",   int(roi["x2"]/w_img*100), 40, 100),
-            ("y1 %",  "y1",   int(roi["y1"]/h_img*100), 0,   50),
-            ("y2 %",  "y2",   int(roi["y2"]/h_img*100), 50, 100),
+            ("x1 %",  "x1",   int(roi["x1"]/w_img*100), 0,   100),
+            ("x2 %",  "x2",   int(roi["x2"]/w_img*100), 0,   100),
+            ("y1 %",  "y1",   int(roi["y1"]/h_img*100), 0,   100),
+            ("y2 %",  "y2",   int(roi["y2"]/h_img*100), 0,   100),
             ("d_min", "d_min",roi["d_min"]//10,          50, 250),
             ("d_max", "d_max",roi["d_max"]//10,          50, 400),
         ]
@@ -1004,12 +1061,12 @@ class ZoneMarkerDialog(QDialog):
             vl  = QLabel(str(val))
             vl.setFixedWidth(28)
             vl.setStyleSheet(f"font-size:12px;color:{TEXT_PRI};")
-            def _cb(v, k=key, vlbl=vl):
+            def _cb(v, k=key, vlbl=vl, w_i=w_img, h_i=h_img):
                 vlbl.setText(str(v))
                 if k in ("x1","x2"):
-                    STATE.roi_params[self.view_name][k] = int(v/100*1280)
+                    STATE.roi_params[self.view_name][k] = int(v/100*w_i)
                 elif k in ("y1","y2"):
-                    STATE.roi_params[self.view_name][k] = int(v/100*720)
+                    STATE.roi_params[self.view_name][k] = int(v/100*h_i)
                 else:
                     STATE.roi_params[self.view_name][k] = v * 10
                 self._refresh_base()
@@ -1066,20 +1123,23 @@ class ZoneMarkerDialog(QDialog):
         self._refresh()
 
     def _refresh_base(self):
-        """Regenera el canvas depth con los parametros ROI actuales."""
+        """Regenera el canvas depth (recortado a la ROI actual) con los
+        parámetros ROI actuales — se llama cuando el usuario mueve los
+        sliders ROI de este diálogo."""
         depth = STATE.depths.get(self.view_name)
         if depth is None:
             return
-        valid = depth[(depth > 300) & (depth < 4000)]
-        d_norm = np.zeros_like(depth, dtype=np.uint8)
+        # Recalcular el recorte por si el usuario movió los sliders ROI
+        self._crop_x1, self._crop_y1, self._crop_x2, self._crop_y2 = \
+            self._compute_crop_bounds()
+        depth_crop = depth[self._crop_y1:self._crop_y2,
+                            self._crop_x1:self._crop_x2]
+        valid = depth_crop[(depth_crop > 300) & (depth_crop < 4000)]
+        d_norm = np.zeros_like(depth_crop, dtype=np.uint8)
         if len(valid) > 0:
-            mask_v = (depth > 300) & (depth < 4000)
-            d_norm[mask_v] = ((depth[mask_v]-valid.min())/(valid.max()-valid.min())*255).astype(np.uint8)
+            mask_v = (depth_crop > 300) & (depth_crop < 4000)
+            d_norm[mask_v] = ((depth_crop[mask_v]-valid.min())/(valid.max()-valid.min())*255).astype(np.uint8)
         base_bgr = cv2.applyColorMap(d_norm, cv2.COLORMAP_PLASMA)
-        # Dibujar ROI box sobre el depth
-        roi = STATE.roi_params[self.view_name]
-        cv2.rectangle(base_bgr, (roi["x1"],roi["y1"]),
-                      (roi["x2"],roi["y2"]), (0,255,255), 2)
         self._orig_rgb = cv2.cvtColor(base_bgr, cv2.COLOR_BGR2RGB)
         h, w = self._orig_rgb.shape[:2]
         scale = min(700/w, 550/h)
@@ -1102,10 +1162,17 @@ class ZoneMarkerDialog(QDialog):
             c = self.ZONE_COLORS.get(z, (180,180,180))
             pen = QPen(QColor(*c), 2)
             painter.setPen(pen)
-            x1s = int(r["x1"]*self._scale)
-            y1s = int(r["y1"]*self._scale)
-            x2s = int(r["x2"]*self._scale)
-            y2s = int(r["y2"]*self._scale)
+            # r está en coordenadas ABSOLUTAS de la imagen completa; el
+            # canvas ahora muestra el RECORTE, así que hay que restar el
+            # offset del recorte antes de escalar a píxeles de canvas.
+            rx1 = r["x1"] - self._crop_x1
+            ry1 = r["y1"] - self._crop_y1
+            rx2 = r["x2"] - self._crop_x1
+            ry2 = r["y2"] - self._crop_y1
+            x1s = int(rx1*self._scale)
+            y1s = int(ry1*self._scale)
+            x2s = int(rx2*self._scale)
+            y2s = int(ry2*self._scale)
             painter.drawRect(x1s, y1s, x2s-x1s, y2s-y1s)
             painter.setFont(QFont("Arial", 9, QFont.Bold))
             painter.setPen(QPen(QColor(*c)))
@@ -1176,10 +1243,10 @@ class ZoneMarkerDialog(QDialog):
             if y2s - y1s < 15:
                 mid = (y1s+y2s)//2
                 y1s, y2s = mid-15, mid+15
-            x1 = int(x1s/self._scale)
-            y1 = int(y1s/self._scale)
-            x2 = int(x2s/self._scale)
-            y2 = int(y2s/self._scale)
+            x1 = int(x1s/self._scale) + self._crop_x1
+            y1 = int(y1s/self._scale) + self._crop_y1
+            x2 = int(x2s/self._scale) + self._crop_x1
+            y2 = int(y2s/self._scale) + self._crop_y1
             z = self.zones_for_view[self.current_idx]
             self.zone_rects[z] = {"x1":x1,"y1":y1,"x2":x2,"y2":y2}
             self.first_pt = None
@@ -1195,55 +1262,103 @@ class ZoneMarkerDialog(QDialog):
         Detecta los 33 landmarks de MediaPipe y los dibuja sobre
         el canvas RGB y el canvas depth de la subventana de zonas.
         Los landmarks ayudan a ubicar visualmente las zonas anatomicas.
+
+        Todo el cuerpo del método va envuelto en try/except: un error acá
+        (modelo faltante, imagen inválida, lo que sea) nunca debe cerrar
+        la aplicación — a lo sumo, esta ventana se queda sin actualizar.
         """
-        from src.pose_overlay import (
-            _detect_landmarks, _landmarks_to_pixels,
-            _draw_on_frame, _depth_to_bgr,
-            PARALLAX_X, PARALLAX_Y
-        )
-        import cv2 as _cv2
-        from PyQt5.QtGui import QImage, QPixmap
-
-        rgb   = STATE.rgbs.get(self.view_name)
-        depth = STATE.depths.get(self.view_name)
-        if rgb is None:
-            return
-
-        # Detectar landmarks sobre el RGB (en formato RGB para MediaPipe)
-        rgb_for_mp = _cv2.cvtColor(rgb.astype("uint8"), _cv2.COLOR_BGR2RGB)
-        landmarks  = _detect_landmarks(rgb_for_mp)
-        if landmarks is None:
-            return
-
-        H_orig, W_orig = rgb.shape[:2]
-
-        # Puntos para RGB (sin offset)
-        points = _landmarks_to_pixels(landmarks, H_orig, W_orig)
-
-        # Puntos para depth (con offset de paralaje)
-        points_depth = []
-        for (x, y, vis) in points:
-            x_d = max(0, min(W_orig - 1, x + PARALLAX_X))
-            y_d = max(0, min(H_orig - 1, y + PARALLAX_Y))
-            points_depth.append((x_d, y_d, vis))
-
-        H_canvas, W_canvas = self._img_h, self._img_w
-
-        # ── Actualizar canvas depth (unico canvas) con landmarks y paralaje ────
-        if depth is not None:
-            depth_bgr     = _depth_to_bgr(depth)
-            depth_ann_bgr = _draw_on_frame(depth_bgr, points_depth)
-            depth_ann_rgb = _cv2.cvtColor(depth_ann_bgr, _cv2.COLOR_BGR2RGB)
-            scaled        = _cv2.resize(depth_ann_rgb, (W_canvas, H_canvas))
-            qi = QImage(scaled.data, W_canvas, H_canvas,
-                        3*W_canvas, QImage.Format_RGB888).copy()
-            self._base_pixmap = QPixmap.fromImage(qi)
-            # Actualizar _orig_rgb para que _refresh conserve los landmarks
-            self._orig_rgb = _cv2.cvtColor(
-                _cv2.resize(depth_ann_bgr, (W_orig, H_orig)),
-                _cv2.COLOR_BGR2RGB
+        try:
+            from src.pose_overlay import (
+                _detect_landmarks, _landmarks_to_pixels,
+                _draw_on_frame, _depth_to_bgr,
+                _scaled_parallax, model_available
             )
-        self._refresh()
+            import cv2 as _cv2
+            from PyQt5.QtGui import QImage, QPixmap
+
+            rgb   = STATE.rgbs.get(self.view_name)
+            depth = STATE.depths.get(self.view_name)
+            if rgb is None:
+                return
+
+            if not model_available():
+                QMessageBox.warning(
+                    self, "Modelo no disponible",
+                    "No se encontró el modelo de detección de landmarks y "
+                    "no se pudo descargar automáticamente (revisa tu "
+                    "conexión a internet). Puedes colocarlo manualmente en\n"
+                    "models/pose_landmarker_full.task"
+                )
+                return
+
+            # Recortar RGB y depth a la misma sección ROI que muestra el
+            # canvas — antes se detectaba sobre la imagen COMPLETA y, si no
+            # se conseguían todos los landmarks, terminaba mostrando el
+            # depth completo en vez de mantener el recorte delimitado.
+            cx1, cy1, cx2, cy2 = self._crop_x1, self._crop_y1, self._crop_x2, self._crop_y2
+            rgb_crop   = rgb[cy1:cy2, cx1:cx2]
+            depth_crop = depth[cy1:cy2, cx1:cx2] if depth is not None else None
+
+            # Detectar landmarks sobre el RECORTE (en formato RGB para MediaPipe)
+            rgb_for_mp = _cv2.cvtColor(rgb_crop.astype("uint8"), _cv2.COLOR_BGR2RGB)
+            landmarks  = _detect_landmarks(rgb_for_mp)
+            if landmarks is None:
+                QMessageBox.information(
+                    self, "Sin detección",
+                    "No se pudo detectar una persona en la sección "
+                    "delimitada de esta vista."
+                )
+                return
+
+            H_orig, W_orig = rgb_crop.shape[:2]
+
+            # Puntos relativos al RECORTE (sin offset)
+            points = _landmarks_to_pixels(landmarks, H_orig, W_orig)
+
+            # Offset de paralaje (normalmente 0 — ver nota en pose_overlay.py;
+            # camera.py ya alinea depth↔color por hardware). Se calcula sobre
+            # el tamaño de la imagen COMPLETA porque el offset físico no
+            # depende de dónde se recorta, y luego se recorta cada punto a
+            # los límites del recorte — los puntos que caen fuera
+            # simplemente no se dibujan (no se descarta el detector entero).
+            off_x, off_y = _scaled_parallax(self._real_w, self._real_h)
+            points_depth = []
+            for (x, y, vis) in points:
+                x_d = x + off_x
+                y_d = y + off_y
+                if x_d < 0 or x_d >= W_orig or y_d < 0 or y_d >= H_orig:
+                    vis = 0.0   # fuera del recorte → no se dibuja
+                x_d = max(0, min(W_orig - 1, x_d))
+                y_d = max(0, min(H_orig - 1, y_d))
+                points_depth.append((x_d, y_d, vis))
+
+            H_canvas, W_canvas = self._img_h, self._img_w
+
+            # ── Actualizar canvas depth (recortado) con landmarks y paralaje ──
+            if depth_crop is not None:
+                depth_bgr     = _depth_to_bgr(depth_crop)
+                depth_ann_bgr = _draw_on_frame(depth_bgr, points_depth)
+                depth_ann_rgb = _cv2.cvtColor(depth_ann_bgr, _cv2.COLOR_BGR2RGB)
+                scaled        = _cv2.resize(depth_ann_rgb, (W_canvas, H_canvas))
+                qi = QImage(scaled.data, W_canvas, H_canvas,
+                            3*W_canvas, QImage.Format_RGB888).copy()
+                self._base_pixmap = QPixmap.fromImage(qi)
+                # Actualizar _orig_rgb para que _refresh conserve los landmarks
+                self._orig_rgb = _cv2.cvtColor(
+                    _cv2.resize(depth_ann_bgr, (W_orig, H_orig)),
+                    _cv2.COLOR_BGR2RGB
+                )
+            self._refresh()
+
+        except Exception as e:
+            import traceback
+            print(f"⚠ Error detectando landmarks: {e}")
+            traceback.print_exc()
+            QMessageBox.warning(
+                self, "Error detectando landmarks",
+                f"Ocurrió un problema al detectar landmarks, pero la "
+                f"aplicación sigue funcionando normalmente.\n\nDetalle: {e}"
+            )
 
     def _redo(self):
         if self.current_idx > 0:
@@ -1277,6 +1392,38 @@ class Page2Measurements(QWidget):
         elevate(left, blur=20, y_offset=2, alpha=10)
         ll = QVBoxLayout(left)
         ll.setContentsMargins(12,12,12,12); ll.setSpacing(6)
+
+        ll.addWidget(hline())
+
+        self.chk_only_neck = QCheckBox("Solo cuello")
+        self.chk_only_neck.setToolTip(
+            "Si se activa: la comparación y todos los cálculos derivados "
+            "(malla de referencia, volumen por zona, PDF) usan "
+            "únicamente la circunferencia del cuello. El resto de zonas, "
+            "si se detectan, se ignoran para esos cálculos.\n"
+            "Si se deja desactivado, el flujo funciona normal (todas las "
+            "zonas disponibles)."
+        )
+        self.chk_only_neck.setStyleSheet(f"""
+            QCheckBox{{font-size:13px;font-weight:600;color:{TEXT_PRI};spacing:8px;}}
+            QCheckBox::indicator{{width:16px;height:16px;border-radius:4px;
+                border:1.5px solid {BORDER_STRONG};background:{BG_PANEL};}}
+            QCheckBox::indicator:checked{{background:{TEAL};border-color:{TEAL};}}
+            QCheckBox::indicator:hover{{border-color:{TEAL};}}
+        """)
+        self.chk_only_neck.setChecked(STATE.only_neck_mode)
+        self.chk_only_neck.toggled.connect(self._on_only_neck_toggled)
+        ll.addWidget(self.chk_only_neck)
+
+        self.lbl_only_neck_hint = QLabel(
+            "Solo se medirá y comparará la circunferencia del cuello."
+        )
+        self.lbl_only_neck_hint.setStyleSheet(
+            f"font-size:11px;color:{TEXT_HINT};font-style:italic;"
+        )
+        self.lbl_only_neck_hint.setWordWrap(True)
+        self.lbl_only_neck_hint.setVisible(STATE.only_neck_mode)
+        ll.addWidget(self.lbl_only_neck_hint)
 
         ll.addWidget(hline())
 
@@ -1342,6 +1489,10 @@ class Page2Measurements(QWidget):
         if not STATE.pipeline_done:
             self.btn_next.setEnabled(False)
 
+    def _on_only_neck_toggled(self, checked: bool):
+        STATE.only_neck_mode = checked
+        self.lbl_only_neck_hint.setVisible(checked)
+
     def _rebuild_images(self):
         while self.img_layout.count():
             item = self.img_layout.takeAt(0)
@@ -1405,16 +1556,66 @@ class Page2Measurements(QWidget):
 
             grid.addWidget(cell, row, col, rspan, cspan)
 
-            depth = STATE.depths.get(name)
-            if depth is not None:
-                valid = depth[(depth > 300) & (depth < 4000)]
-                if len(valid) > 0:
-                    d_norm = np.zeros_like(depth, dtype=np.uint8)
-                    mask_v = (depth > 300) & (depth < 4000)
-                    d_norm[mask_v] = ((depth[mask_v]-valid.min())/(valid.max()-valid.min())*255).astype(np.uint8)
-                    w_dep.set_image_array(cv2.applyColorMap(d_norm, cv2.COLORMAP_PLASMA))
+            img = self._render_roi_depth(name)
+            if img is not None:
+                w_dep.set_image_array(img)
 
         self.img_layout.addWidget(grid_container, stretch=1)
+
+    def _roi_bounds(self, name):
+        """(x1,y1,x2,y2) del ROI de esta vista, ordenados y recortados a
+        los límites reales de la imagen. None si no hay depth cargado."""
+        depth = STATE.depths.get(name)
+        if depth is None:
+            return None
+        h, w = depth.shape[:2]
+        roi = STATE.roi_params.get(name)
+        if not roi:
+            return (0, 0, w, h)
+        x1, x2 = sorted((roi["x1"], roi["x2"]))
+        y1, y2 = sorted((roi["y1"], roi["y2"]))
+        x1, x2 = max(0, x1), min(w, x2)
+        y1, y2 = max(0, y1), min(h, y2)
+        if x2 - x1 < 2 or y2 - y1 < 2:
+            return (0, 0, w, h)   # ROI degenerada — usar la imagen completa
+        return (x1, y1, x2, y2)
+
+    def _render_roi_depth(self, name):
+        """
+        Recorta el depth a la zona ROI (x1/x2/y1/y2) fijada en la página
+        de Captura y devuelve SOLO esa sección coloreada — no la imagen
+        completa con un recuadro encima. Si ya se corrió el pipeline al
+        menos una vez, además oscurece dentro del recorte todo lo que
+        quedó fuera de la máscara real usada para medir (STATE.segs), así
+        que lo que se ve aquí es exactamente lo que se analiza.
+        """
+        depth = STATE.depths.get(name)
+        if depth is None:
+            return None
+        bounds = self._roi_bounds(name)
+        if bounds is None:
+            return None
+        x1, y1, x2, y2 = bounds
+        depth_crop = depth[y1:y2, x1:x2]
+
+        valid = depth_crop[(depth_crop > 300) & (depth_crop < 4000)]
+        if len(valid) == 0:
+            return None
+        d_norm = np.zeros_like(depth_crop, dtype=np.uint8)
+        mask_v = (depth_crop > 300) & (depth_crop < 4000)
+        d_norm[mask_v] = ((depth_crop[mask_v]-valid.min())/(valid.max()-valid.min())*255).astype(np.uint8)
+        img = cv2.applyColorMap(d_norm, cv2.COLORMAP_PLASMA)
+
+        seg = STATE.segs.get(name)
+        if seg is not None and seg.get("mask") is not None:
+            mask_full = seg["mask"]
+            if mask_full.shape[:2] == depth.shape[:2]:
+                mask_crop = mask_full[y1:y2, x1:x2]
+                body_mask = mask_crop > 0
+                dimmed = (img.astype(np.float32) * 0.35).astype(np.uint8)
+                img = np.where(body_mask[..., None], img, dimmed)
+
+        return img
 
     # ── MODIFICACIÓN 3 ─────────────────────────────────────────────────────────
     def _update_measurements_display(self):
@@ -1471,28 +1672,37 @@ class Page2Measurements(QWidget):
         # Dibujar sobre la imagen depth de cada vista
         for view_name, zone_rects in rects_by_view.items():
             widgets = self._view_images.get(view_name)
-            depth   = STATE.depths.get(view_name)
-            if widgets is None or depth is None:
+            if widgets is None:
                 continue
 
-            # Generar imagen depth coloreada
-            valid = depth[(depth > 300) & (depth < 4000)]
-            if len(valid) == 0:
+            # Base: depth recortado a la ROI + máscara segmentada (ya
+            # oscurece dentro del recorte lo que quedó fuera de la zona
+            # x/y/d seleccionada en Captura)
+            img = self._render_roi_depth(view_name)
+            if img is None:
                 continue
-            d_norm = np.zeros_like(depth, dtype=np.uint8)
-            mask_v = (depth > 300) & (depth < 4000)
-            d_norm[mask_v] = ((depth[mask_v] - valid.min()) /
-                               (valid.max() - valid.min()) * 255).astype(np.uint8)
-            img = cv2.applyColorMap(d_norm, cv2.COLORMAP_PLASMA)
 
-            # Dibujar cada cuadrante
+            bounds = self._roi_bounds(view_name)
+            ox, oy = (bounds[0], bounds[1]) if bounds else (0, 0)
+            crop_h, crop_w = img.shape[:2]
+
+            # Dibujar cada cuadrante — los rects de zona vienen en
+            # coordenadas de la imagen COMPLETA, pero img ya está
+            # recortada a la ROI, así que hay que restar el offset
+            # (ox, oy) del recorte y descartar lo que quede fuera.
             for zona, rect, cm in zone_rects:
                 color = COLORS_BGR.get(zona, (255, 255, 255))
-                x1, y1 = rect["x1"], rect["y1"]
-                x2, y2 = rect["x2"], rect["y2"]
-                cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+                x1 = rect["x1"] - ox
+                y1 = rect["y1"] - oy
+                x2 = rect["x2"] - ox
+                y2 = rect["y2"] - oy
+                if x2 <= 0 or y2 <= 0 or x1 >= crop_w or y1 >= crop_h:
+                    continue   # el rect de esta zona cae fuera del recorte
+                x1c, y1c = max(0, x1), max(0, y1)
+                x2c, y2c = min(crop_w, x2), min(crop_h, y2)
+                cv2.rectangle(img, (x1c, y1c), (x2c, y2c), color, 2)
                 label = f"{zona} {cm}cm" if cm else zona
-                cv2.putText(img, label, (x1 + 3, y1 - 5),
+                cv2.putText(img, label, (x1c + 3, max(10, y1c - 5)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1,
                             cv2.LINE_AA)
 
@@ -1573,45 +1783,113 @@ class Page2Measurements(QWidget):
         Botón 'Detectar landmarks' en Página 2.
         Corre MediaPipe sobre todas las vistas cargadas y actualiza
         los ImageWithOverlay de cada vista con RGB y depth anotados.
+
+        Todo el método va envuelto en try/except (y cada vista se procesa
+        en su propio try/except dentro del for): cualquier error nunca
+        debe cerrar la aplicación, a lo sumo esa vista queda sin detectar.
         """
-        from src.pose_overlay import draw_landmarks_on_images
+        try:
+            from src.pose_overlay import draw_landmarks_on_images, model_available
 
-        if not STATE.rgbs:
-            self.lbl_status.setText("Carga imágenes primero.")
-            return
+            if not STATE.rgbs:
+                self.lbl_status.setText("Carga imágenes primero.")
+                return
 
-        self.btn_landmarks_p2.setEnabled(False)
-        self.lbl_status.setText("Detectando landmarks...")
-        QApplication.processEvents()
+            if not model_available():
+                self.lbl_status.setText(
+                    "⚠ El modelo de landmarks no está disponible ni se pudo "
+                    "descargar automáticamente — revisa la consola."
+                )
+                QMessageBox.warning(
+                    self, "Modelo no disponible",
+                    "No se encontró el modelo de detección de landmarks en "
+                    "ninguna de estas rutas:\n"
+                    "  - models/pose_landmarker_full.task\n"
+                    "  - /tmp/pose_landmarker_full.task\n\n"
+                    "Se intentó descargarlo automáticamente y no fue "
+                    "posible (revisa tu conexión a internet). También "
+                    "puedes colocarlo manualmente en cualquiera de esas "
+                    "dos rutas, o revisar la consola para el link de "
+                    "descarga manual."
+                )
+                return
 
-        found_any = False
-        for name in STATE.view_names:
-            rgb   = STATE.rgbs.get(name)
-            depth = STATE.depths.get(name)
-            if rgb is None:
-                continue
-            if depth is None:
-                depth = np.zeros(rgb.shape[:2], dtype=np.float32)
+            self.btn_landmarks_p2.setEnabled(False)
+            self.lbl_status.setText("Detectando landmarks...")
+            QApplication.processEvents()
 
-            rgb_ann, depth_ann, ok = draw_landmarks_on_images(rgb, depth)
+            ok_views, failed_views = [], []
+            for name in STATE.view_names:
+                try:
+                    rgb   = STATE.rgbs.get(name)
+                    depth = STATE.depths.get(name)
+                    if rgb is None:
+                        continue
+                    if depth is None:
+                        depth = np.zeros(rgb.shape[:2], dtype=np.float32)
 
-            if ok:
-                widgets = self._view_images.get(name)
-                if isinstance(widgets, dict):
-                    # Nuevo formato — dict con claves "rgb" y "depth"
-                    if rgb_ann is not None:
-                        widgets["rgb"].set_image_array(rgb_ann)
-                    if depth_ann is not None:
-                        widgets["depth"].set_image_array(depth_ann)
-                elif widgets is not None:
-                    # Formato viejo — ImageWithOverlay directo (solo RGB)
-                    if rgb_ann is not None:
-                        widgets.set_image_array(rgb_ann)
-                found_any = True
+                    # Recortar a la ROI (misma sección que muestra el
+                    # preview de esta página, ver _render_roi_depth) antes
+                    # de detectar — si no, draw_landmarks_on_images corre
+                    # sobre la imagen completa y termina reemplazando el
+                    # preview recortado por la imagen completa otra vez.
+                    bounds = self._roi_bounds(name)
+                    if bounds:
+                        x1, y1, x2, y2 = bounds
+                        rgb_in   = rgb[y1:y2, x1:x2]
+                        depth_in = depth[y1:y2, x1:x2]
+                    else:
+                        rgb_in, depth_in = rgb, depth
 
-        self.btn_landmarks_p2.setEnabled(True)
-        self.lbl_status.setText("Landmarks detectados ✓" if found_any
-                                 else "No se detectó ninguna persona.")
+                    rgb_ann, depth_ann, ok = draw_landmarks_on_images(rgb_in, depth_in)
+
+                    if ok:
+                        widgets = self._view_images.get(name)
+                        if isinstance(widgets, dict):
+                            # Nuevo formato — dict con claves "rgb" y "depth"
+                            if rgb_ann is not None:
+                                widgets["rgb"].set_image_array(rgb_ann)
+                            if depth_ann is not None:
+                                widgets["depth"].set_image_array(depth_ann)
+                        elif widgets is not None:
+                            # Formato viejo — ImageWithOverlay directo (solo RGB)
+                            if rgb_ann is not None:
+                                widgets.set_image_array(rgb_ann)
+                        ok_views.append(name)
+                    else:
+                        failed_views.append(name)
+                except Exception as e:
+                    import traceback
+                    print(f"⚠ Error detectando landmarks en '{name}': {e}")
+                    traceback.print_exc()
+                    failed_views.append(name)
+
+            self.btn_landmarks_p2.setEnabled(True)
+            if ok_views and not failed_views:
+                self.lbl_status.setText(f"Landmarks detectados ✓ ({len(ok_views)}/{len(ok_views)} vistas)")
+            elif ok_views and failed_views:
+                self.lbl_status.setText(
+                    f"Detectado en {len(ok_views)} vista(s): {', '.join(ok_views)}  |  "
+                    f"No se detectó en: {', '.join(failed_views)} (ver consola)"
+                )
+            else:
+                self.lbl_status.setText(
+                    "No se detectó ninguna persona en ninguna vista. "
+                    "Revisa la consola (imprime tamaño/brillo de cada imagen "
+                    "analizada) para más detalle."
+                )
+
+        except Exception as e:
+            import traceback
+            print(f"⚠ Error general detectando landmarks: {e}")
+            traceback.print_exc()
+            self.btn_landmarks_p2.setEnabled(True)
+            self.lbl_status.setText("Error detectando landmarks (ver consola).")
+            QMessageBox.warning(
+                self, "Error detectando landmarks",
+                f"Ocurrió un problema, pero la aplicación sigue funcionando "
+                f"normalmente.\n\nDetalle: {e}"
+            )
 
     def _run_pipeline(self):
         STATE.measurements.clear()
@@ -1665,7 +1943,7 @@ class Page3Results(QWidget):
         root.setContentsMargins(12,12,12,12)
         root.setSpacing(10)
 
-        left = QWidget(); left.setFixedWidth(220)
+        left = QWidget(); left.setFixedWidth(290)
         left.setStyleSheet(card_panel())
 
         elevate(left, blur=20, y_offset=2, alpha=10)
@@ -1696,7 +1974,7 @@ class Page3Results(QWidget):
 
         ll.addWidget(hline())
 
-        self.btn_run_smpl = btn("Comparar con SMPL", TEAL, TEAL, variant="solid")
+        self.btn_run_smpl = btn("Comparar con Malla de Referencia", TEAL, TEAL, variant="solid")
         self.btn_run_smpl.clicked.connect(self._run_smpl)
         ll.addWidget(self.btn_run_smpl)
 
@@ -1720,9 +1998,12 @@ class Page3Results(QWidget):
         center = QWidget()
         cl = QVBoxLayout(center); cl.setSpacing(8)
 
-        cl.addWidget(section_label("Comparación de mallas — real vs referencia SMPL"))
+        cl.addWidget(section_label("Comparación — malla actual vs. referencia"))
 
-        self.img_comparison = QLabel("Ejecuta la comparación SMPL para ver resultados")
+        self.img_comparison = QLabel(
+            "Presiona 'Comparar con Malla de Referencia' para generar y "
+            "comparar las mallas 3D"
+        )
         self.img_comparison.setAlignment(Qt.AlignCenter)
         self.img_comparison.setStyleSheet(
             f"background:{BG_CARD};border:1.5px dashed {BORDER_STRONG};"
@@ -1736,7 +2017,7 @@ class Page3Results(QWidget):
 
         self.table_widget = QWidget()
         tl = QGridLayout(self.table_widget); tl.setSpacing(4)
-        headers = ["Zona","Ancho frontal","Prof. lateral","Perímetro"]
+        headers = ["Zona", "Valor actual", "Valor referencia", "Diferencia"]
         for ci, h in enumerate(headers):
             hl = QLabel(h)
             hl.setStyleSheet(
@@ -1768,24 +2049,80 @@ class Page3Results(QWidget):
 
     def _update_table(self):
         """
-        Actualiza la tabla de Page3.
-        Lee circumference_cm del dict completo si está disponible.
+        Actualiza la tabla de Page3: valor actual (medido por el
+        pipeline, STATE.measurements) y valor de referencia (predicho
+        para IMC saludable — solo disponible después de presionar
+        'Comparar con Malla de Referencia', STATE.smpl_result).
         """
+        # cuello/pecho/cintura/cadera/muslo/rodilla tienen equivalente en
+        # el modelo de regresión (predict_measurements); "brazo" no tiene
+        # una medida de referencia directa disponible.
+        ZONE_TO_REGRESSION_KEY = {
+            "cuello": "neck", "pecho": "chest", "cintura": "abdomen",
+            "cadera": "hip", "muslo": "thigh", "rodilla": "knee",
+        }
+        synth_meas = (STATE.smpl_result or {}).get("synth_meas", {})
+
         for zone, row in self._table_rows.items():
             row[0].setText(zone.capitalize())
-            d = STATE.diag.get(zone, {})
-            row[1].setText(f"{d.get('w_front_cm','—')} cm" if d.get('w_front_cm') else "—")
-            row[2].setText(f"{d.get('w_side_cm','—')} cm"  if d.get('w_side_cm')  else "—")
-            # Leer circumference_cm del dict completo o del formato viejo
+
             meas_data = STATE.measurements.get(zone)
-            if isinstance(meas_data, dict):
-                val = meas_data.get("circumference_cm")
+            actual = (meas_data.get("circumference_cm")
+                      if isinstance(meas_data, dict) else meas_data)
+            row[1].setText(f"{actual:.1f} cm" if actual else "—")
+
+            # En modo "Solo cuello", la comparación real solo se calculó
+            # con el cuello — mostrar referencia de otras zonas aquí
+            # confundiría, ya que esos números no participaron en la
+            # malla/volumen mostrados arriba.
+            if STATE.only_neck_mode and zone != "cuello":
+                row[2].setText("—")
+                row[3].setText("—")
+                continue
+
+            ref_key = ZONE_TO_REGRESSION_KEY.get(zone)
+            referencia = synth_meas.get(ref_key) if ref_key else None
+            row[2].setText(f"{referencia:.1f} cm" if referencia else "—")
+
+            if actual and referencia:
+                diff = actual - referencia
+                sign = "+" if diff >= 0 else ""
+                row[3].setText(f"{sign}{diff:.1f} cm")
             else:
-                val = meas_data
-            row[3].setText(f"{val:.1f} cm" if val else "—")
+                row[3].setText("—")
 
     def _run_smpl(self):
-        self.lbl_status.setText("Ajustando SMPL (~40s primera vez)...")
+        only_neck = STATE.only_neck_mode
+
+        if only_neck:
+            cuello_data = STATE.measurements.get("cuello")
+            has_cuello = (isinstance(cuello_data, dict)
+                          and cuello_data.get("circumference_cm"))
+            if not has_cuello:
+                QMessageBox.warning(
+                    self, "Falta la medida del cuello",
+                    "El modo 'Solo cuello' está activo (página de Mediciones) "
+                    "pero todavía no hay una medida de circunferencia del "
+                    "cuello. Ejecuta el pipeline en Mediciones primero."
+                )
+                return
+            real_zones = {"cuello": cuello_data}
+        else:
+            real_zones = {z: d for z, d in STATE.measurements.items()
+                          if z in ("cuello", "pecho", "cintura", "cadera")
+                          and isinstance(d, dict) and d.get("circumference_cm")}
+            if len(real_zones) < 2:
+                QMessageBox.warning(
+                    self, "Faltan medidas",
+                    "Necesito al menos 2 de estas 4 zonas medidas (cuello, pecho, "
+                    "cintura, cadera) para generar la malla real. Ejecuta el "
+                    "pipeline en la página de Mediciones primero.\n\n"
+                    "(Si solo quieres trabajar con el cuello, activa la opción "
+                    "'Solo cuello' en la página de Mediciones)."
+                )
+                return
+
+        self.lbl_status.setText("Generando mallas y comparando...")
         self.btn_run_smpl.setEnabled(False)
         from PyQt5.QtCore import QThread, pyqtSignal as Signal
         class SmplThread(QThread):
@@ -1793,81 +2130,115 @@ class Page3Results(QWidget):
             error = Signal(str)
             def run(self):
                 try:
-                    from src.smpl_fitting     import (load_smpl_model,
-                                                       generate_smpl_mesh,
-                                                       get_vertices)
                     from src.regression_model import UserInputs, predict_measurements
                     from src.volume_comparison import (create_comparison_mesh,
                                                         save_comparison_figure,
-                                                        compute_zone_statistics)
-                    from src.smpl_cache        import (load_cached_betas,
-                                                        save_cached_betas)
+                                                        compute_zone_statistics,
+                                                        compute_zone_volumes)
+                    from src.body_shape_reshaper import model_files_available
 
                     p = STATE.patient
-                    # Usar género correcto del paciente para SMPL
-                    smpl_gender = "male" if p["sex"] == "male" else "female"
-                    smpl_model = load_smpl_model("models", smpl_gender)
+                    gender = "male" if p["sex"] == "male" else "female"
 
-                    # ── Malla REAL: medidas del paciente con sus parametros actuales ──
-                    real_inputs = UserInputs(
-                        body_fat = p["body_fat"],
-                        sex      = p["sex"],
-                        age      = p["age"],
-                        weight   = p["weight"],
-                        height   = p["height"],
-                    )
-                    real_meas = predict_measurements(real_inputs)
-                    real_fmt  = {
-                        "cuello":  {"circumference_cm": real_meas["neck"]},
-                        "pecho":   {"circumference_cm": real_meas["chest"]},
-                        "cintura": {"circumference_cm": real_meas["abdomen"]},
-                        "cadera":  {"circumference_cm": real_meas["hip"]},
-                    }
-                    real_target = {z: round(float(d["circumference_cm"]),1)
-                                   for z, d in real_fmt.items()}
-                    cached_real = load_cached_betas(real_target, smpl_gender)
-                    if cached_real is not None:
-                        verts_real = get_vertices(smpl_model, cached_real)
-                    else:
-                        verts_real, _, betas_real_opt = generate_smpl_mesh(
-                            real_fmt, "models", smpl_gender
-                        )
-                        save_cached_betas(real_target, betas_real_opt, smpl_gender)
+                    real_fmt = {z: {"circumference_cm": d["circumference_cm"]}
+                                for z, d in real_zones.items()}
+                    real_target = {z: round(float(v["circumference_cm"]), 1)
+                                   for z, v in real_fmt.items()}
+                    print(f"  Medidas reales usadas: {real_target}"
+                          + (" (modo: SOLO CUELLO)" if only_neck else ""))
 
-                    # ── Malla SINTETICA: mismo paciente con peso ideal (IMC 22) ──
-                    # peso_ideal = 22 * altura^2
                     ideal_weight = round(22.0 * p["height"] ** 2, 1)
                     synth_inputs = UserInputs(
-                        body_fat = p["body_fat"],
-                        sex      = p["sex"],
-                        age      = p["age"],
-                        weight   = ideal_weight,
-                        height   = p["height"],
+                        body_fat=p["body_fat"], sex=p["sex"], age=p["age"],
+                        weight=ideal_weight, height=p["height"],
                     )
                     synth_meas = predict_measurements(synth_inputs)
-                    synth_fmt  = {
-                        "cuello":  {"circumference_cm": synth_meas["neck"]},
-                        "pecho":   {"circumference_cm": synth_meas["chest"]},
-                        "cintura": {"circumference_cm": synth_meas["abdomen"]},
-                        "cadera":  {"circumference_cm": synth_meas["hip"]},
-                    }
-                    target_flat = {z: round(float(d["circumference_cm"]),1)
-                                   for z, d in synth_fmt.items()}
-                    cached_synth = load_cached_betas(target_flat, smpl_gender)
-                    if cached_synth is not None:
-                        verts_synth = get_vertices(smpl_model, cached_synth)
+                    if only_neck:
+                        # Modo "solo cuello": la referencia también se
+                        # limita a la circunferencia del cuello — todo lo
+                        # demás (pecho/cintura/cadera de la malla ideal)
+                        # queda en el promedio poblacional del reshaper,
+                        # igual que en la malla real. Así la comparación
+                        # completa (mallas, volumen por zona, PDF) queda
+                        # explicada únicamente por la diferencia en el
+                        # cuello, tal como se pidió.
+                        synth_fmt = {
+                            "cuello": {"circumference_cm": synth_meas["neck"]},
+                        }
                     else:
-                        verts_synth, _, betas_synth = generate_smpl_mesh(
-                            synth_fmt, "models", smpl_gender
-                        )
-                        save_cached_betas(target_flat, betas_synth, smpl_gender)
-
+                        synth_fmt = {
+                            "cuello":  {"circumference_cm": synth_meas["neck"]},
+                            "pecho":   {"circumference_cm": synth_meas["chest"]},
+                            "cintura": {"circumference_cm": synth_meas["abdomen"]},
+                            "cadera":  {"circumference_cm": synth_meas["hip"]},
+                        }
                     print(f"  Peso actual: {p['weight']}kg  →  Peso ideal IMC22: {ideal_weight}kg")
-                    print(f"  Real — cintura: {real_meas['abdomen']:.1f}cm  cadera: {real_meas['hip']:.1f}cm")
-                    print(f"  Ideal — cintura: {synth_meas['abdomen']:.1f}cm  cadera: {synth_meas['hip']:.1f}cm")
 
-                    _, _, signed_dists = create_comparison_mesh(
-                        verts_real, verts_synth, smpl_model.faces
+                    if model_files_available(gender):
+                        # ── Método preferido: reshaper por medidas
+                        # antropométricas (deformación por facetas, ver
+                        # src/body_shape_reshaper.py). Genera ambas mallas
+                        # con la MISMA topología (12,500 vértices) en un
+                        # solve lineal — mucho más rápido que ajustar SMPL
+                        # (no hay optimización iterativa) y con mayor
+                        # detalle anatómico local.
+                        method_label = "reshaper (medidas → malla)"
+                        from src.body_shape_reshaper import (
+                            BodyShapeReshaper, build_target_mesh,
+                            OUR_ZONE_TO_MEASURE,
+                        )
+                        rs = BodyShapeReshaper(gender)
+
+                        real_mm = {
+                            OUR_ZONE_TO_MEASURE[z]: v["circumference_cm"] * 10.0
+                            for z, v in real_fmt.items()
+                        }
+                        real_mm["height"] = p["height"] * 1000.0
+                        verts_real, faces = build_target_mesh(real_mm, gender, reshaper=rs)
+
+                        ideal_mm = {
+                            OUR_ZONE_TO_MEASURE[z]: v["circumference_cm"] * 10.0
+                            for z, v in synth_fmt.items()
+                        }
+                        ideal_mm["height"] = p["height"] * 1000.0
+                        verts_synth, _ = build_target_mesh(ideal_mm, gender, reshaper=rs)
+                    else:
+                        # ── Respaldo: SMPL + optimización de betas (más
+                        # lento, requiere torch/smplx y los archivos .pkl
+                        # de SMPL). Se usa solo si no están los archivos
+                        # del reshaper en models/body_shape/.
+                        method_label = "SMPL (respaldo — reshaper no disponible)"
+                        from src.smpl_fitting import (load_smpl_model, generate_smpl_mesh,
+                                                       get_vertices)
+                        from src.smpl_cache   import load_cached_betas, save_cached_betas
+                        smpl_model = load_smpl_model("models", gender)
+
+                        cached_real = load_cached_betas(real_target, gender)
+                        if cached_real is not None:
+                            verts_real = get_vertices(smpl_model, cached_real)
+                        else:
+                            verts_real, _, betas_real = generate_smpl_mesh(real_fmt, "models", gender)
+                            save_cached_betas(real_target, betas_real, gender)
+
+                        target_flat = {z: round(float(d["circumference_cm"]), 1)
+                                       for z, d in synth_fmt.items()}
+                        cached_synth = load_cached_betas(target_flat, gender)
+                        if cached_synth is not None:
+                            verts_synth = get_vertices(smpl_model, cached_synth)
+                        else:
+                            verts_synth, _, betas_synth = generate_smpl_mesh(synth_fmt, "models", gender)
+                            save_cached_betas(target_flat, betas_synth, gender)
+                        faces = smpl_model.faces
+
+                    print(f"  Método usado: {method_label}")
+                    if only_neck:
+                        method_label += " — modo: solo cuello"
+
+                    # Misma topología en ambas mallas → comparación directa
+                    # vértice-a-vértice, sin depender de fusión ICP ni de
+                    # vecino-más-cercano entre topologías distintas.
+                    mesh_real, mesh_synth, signed_dists = create_comparison_mesh(
+                        verts_real, verts_synth, faces
                     )
                     save_comparison_figure(
                         verts_real, verts_synth, signed_dists,
@@ -1876,12 +2247,22 @@ class Page3Results(QWidget):
                     zone_stats = compute_zone_statistics(
                         verts_real, verts_synth, signed_dists
                     )
+                    # Volumen real en cm³ por zona (corte de malla con
+                    # planos horizontales + teorema de la divergencia) —
+                    # no una distancia promedio como zone_stats.
+                    try:
+                        zone_volumes = compute_zone_volumes(mesh_real, mesh_synth)
+                    except Exception as e:
+                        print(f"  ⚠ No se pudo calcular volumen por zona: {e}")
+                        zone_volumes = {}
                     STATE.smpl_result = {
                         "zone_stats":   zone_stats,
+                        "zone_volumes": zone_volumes,
                         "img_path":     "output/volume_comparison.png",
-                        "real_meas":    real_meas,
+                        "real_target":  real_target,
                         "synth_meas":   synth_meas,
                         "ideal_weight": ideal_weight,
+                        "method":       method_label,
                     }
                     self.done.emit("output/volume_comparison.png")
                 except Exception:
@@ -1895,9 +2276,13 @@ class Page3Results(QWidget):
 
     def _on_smpl_done(self, img_path):
         self.btn_run_smpl.setEnabled(True)
-        ideal_w = (STATE.smpl_result or {}).get("ideal_weight", "—")
+        result  = STATE.smpl_result or {}
+        ideal_w = result.get("ideal_weight", "—")
+        zonas   = ", ".join(result.get("real_target", {}).keys()) or "—"
+        method  = result.get("method", "")
         self.lbl_status.setText(
-            f"Completado ✓  |  Peso ideal IMC22: {ideal_w} kg"
+            f"Completado ✓  |  Peso ideal IMC22: {ideal_w} kg  |  "
+            f"Medidas: {zonas}  |  {method}"
         )
         if Path(img_path).exists():
             pix = QPixmap(img_path).scaled(
@@ -1907,13 +2292,46 @@ class Page3Results(QWidget):
             )
             self.img_comparison.setPixmap(pix)
         if STATE.smpl_result:
+            # Las tarjetas de la izquierda usan los nombres de ZONES
+            # (cuello/pecho/brazo/cintura/cadera/muslo/rodilla), pero
+            # compute_zone_volumes/compute_zone_statistics usan bandas de
+            # altura con otros nombres (cabeza/cuello/pecho/cintura/
+            # cadera/muslos/piernas) — no coinciden 1:1. Este mapeo
+            # traduce cada tarjeta a su banda correspondiente; "brazo" no
+            # tiene una banda de altura equivalente (los brazos no son
+            # una banda horizontal del cuerpo), así que esa tarjeta queda
+            # sin dato, igual que antes.
+            CARD_TO_BAND = {
+                "cuello": "cuello", "pecho": "pecho", "cintura": "cintura",
+                "cadera": "cadera", "muslo": "muslos", "rodilla": "piernas",
+            }
+            zone_volumes = STATE.smpl_result.get("zone_volumes", {})
+            zone_stats   = STATE.smpl_result.get("zone_stats", {})
             for zone, card in self._zone_cards.items():
-                stats = STATE.smpl_result["zone_stats"].get(zone,{})
-                mean  = stats.get("mean_cm", 0)
-                pct   = stats.get("pct_excess", 50)
-                sign  = "+" if mean >= 0 else ""
-                card["val"].setText(f"{sign}{mean:.2f} cm")
+                # En modo "Solo cuello" las otras zonas no participaron
+                # en la comparación (quedaron en el promedio poblacional
+                # del reshaper) — mostrar un número ahí sugeriría una
+                # diferencia medida que en realidad no se calculó.
+                if STATE.only_neck_mode and zone != "cuello":
+                    card["val"].setText("—")
+                    card["bar"].setValue(0)
+                    continue
+                band = CARD_TO_BAND.get(zone)
+                vol  = zone_volumes.get(band, {}) if band else {}
+                st   = zone_stats.get(band, {}) if band else {}
+                diff_cm3 = vol.get("vol_diff_cm3")
+                pct      = st.get("pct_excess", 50)
+                if diff_cm3 is not None:
+                    sign = "+" if diff_cm3 >= 0 else ""
+                    card["val"].setText(f"{sign}{diff_cm3:.0f} cm³")
+                else:
+                    card["val"].setText("—")
                 card["bar"].setValue(int(pct))
+
+        # La columna "Valor referencia" de la tabla depende de
+        # STATE.smpl_result (recién poblado) — refrescar ahora que ya
+        # existe.
+        self._update_table()
 
     def _on_smpl_error(self, msg):
         self.btn_run_smpl.setEnabled(True)

@@ -146,6 +146,158 @@ def center_pointcloud(pcd: o3d.geometry.PointCloud) -> o3d.geometry.PointCloud:
     return pcd_c
 
 
+def register_icp(source: o3d.geometry.PointCloud,
+                  target: o3d.geometry.PointCloud,
+                  max_corr_dist: float = 0.03,
+                  init: np.ndarray = None):
+    """
+    Refina la alineación de 'source' contra 'target' con ICP punto-a-plano.
+
+    La rotación fija por ángulo asumido (rotate_pointcloud) es solo un
+    punto de partida — asume que la persona no se movió ni un milímetro
+    entre tomas y que el ángulo de cámara es exactamente el nominal. ICP
+    corrige esa desalineación residual real, minimizando la distancia
+    entre la superficie de 'source' y la de 'target' ya fusionada.
+
+    Args:
+        source, target: nubes de puntos en METROS, con normales estimadas
+        max_corr_dist:  distancia máxima (m) para considerar dos puntos
+                        correspondientes — debe ser del orden del error
+                        esperado de la alineación inicial (unos cm)
+        init:           transformación inicial 4x4 (por defecto identidad,
+                        ya que rotate_pointcloud dejó la nube en la zona
+                        correcta aproximada)
+
+    Returns:
+        (transformation 4x4, fitness [0-1], inlier_rmse en metros)
+    """
+    if init is None:
+        init = np.eye(4)
+    if not source.has_normals():
+        source.estimate_normals(
+            o3d.geometry.KDTreeSearchParamHybrid(radius=max_corr_dist, max_nn=30))
+    if not target.has_normals():
+        target.estimate_normals(
+            o3d.geometry.KDTreeSearchParamHybrid(radius=max_corr_dist, max_nn=30))
+
+    reg = o3d.pipelines.registration.registration_icp(
+        source, target, max_corr_dist, init,
+        o3d.pipelines.registration.TransformationEstimationPointToPlane(),
+        o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=60),
+    )
+    return reg.transformation, reg.fitness, reg.inlier_rmse
+
+
+# Ángulos de partida asumidos por vista (grados, rotación sobre eje Y).
+# Son una ALINEACIÓN INICIAL para que ICP tenga de dónde arrancar — no
+# necesitan ser exactos, pero si están muy alejados del ángulo real de
+# captura, ICP puede converger a un mínimo local incorrecto. Si al
+# fusionar ves partes del cuerpo duplicadas o mal orientadas, ajusta
+# estos valores según tu protocolo real de captura (¿la persona gira en
+# sentido horario o antihorario? ¿"lateral_der" es el lado derecho de
+# la persona o el lado derecho visto por la cámara?).
+DEFAULT_VIEW_ANGLES = {
+    "frontal":     {"angle":    0, "flip_x": False},
+    "lateral_der": {"angle":  -90, "flip_x": False},
+    "posterior":   {"angle":  180, "flip_x": False},
+    "lateral_izq": {"angle":   90, "flip_x": False},
+}
+_FUSION_ORDER = ["frontal", "lateral_der", "posterior", "lateral_izq"]
+
+
+def fuse_pointclouds_icp(pcds_mm: dict,
+                          view_angles: dict = None,
+                          voxel_size: float = 0.006,
+                          icp_max_corr_dist: float = 0.03) -> dict:
+    """
+    Fusiona en un solo cuerpo 3D las nubes de puntos por vista que produce
+    src.reconstruction.reconstruct_body() (en milímetros, eje Y creciendo
+    hacia abajo — convención de imagen).
+
+    Para cada vista, en orden frontal → lateral_der → posterior →
+    lateral_izq:
+        1. Convierte a metros e invierte Y (Y-up, misma convención que
+           el resto de este módulo y que SMPL).
+        2. Centra en XZ y rota al ángulo asumido de esa vista (punto de
+           partida, ver DEFAULT_VIEW_ANGLES).
+        3. Si ya hay una nube fusionada previa, refina la alineación de
+           esta vista contra ella con ICP punto-a-plano (register_icp) —
+           esto es lo que corrige la posición real, no solo la asumida.
+        4. Suma la vista alineada a la nube fusionada.
+
+    Args:
+        pcds_mm:     dict {view_name: o3d.geometry.PointCloud} en mm,
+                     tal como quedan en STATE.pcds
+        view_angles: override de DEFAULT_VIEW_ANGLES si tu protocolo de
+                     captura usa otros ángulos/orden
+        voxel_size:  tamaño de voxel (m) para downsample — también define
+                     la escala de detalle que sobrevive a la fusión
+        icp_max_corr_dist: distancia máxima (m) para emparejar puntos
+                     en ICP — subirlo ayuda si la alineación inicial es
+                     peor de lo esperado, pero puede converger mal si es
+                     demasiado grande
+
+    Returns:
+        dict con:
+            "fused_pcd":       nube de puntos fusionada y limpia (metros)
+            "per_view_fitness": {view_name: fitness ICP 0-1} — valores
+                bajos (<0.3) sugieren que esa vista no se alineó bien
+                (revisar el ángulo asumido para esa vista)
+    """
+    view_angles = view_angles or DEFAULT_VIEW_ANGLES
+    names = [n for n in _FUSION_ORDER
+             if n in pcds_mm and pcds_mm[n] is not None and len(pcds_mm[n].points) > 0]
+
+    if not names:
+        return {"fused_pcd": o3d.geometry.PointCloud(), "per_view_fitness": {}}
+
+    fused = None
+    per_view_fitness = {}
+
+    for name in names:
+        src = pcds_mm[name]
+        pts = np.asarray(src.points).copy() / 1000.0     # mm -> m
+        pts[:, 1] *= -1                                    # Y-down -> Y-up
+        cols = (np.asarray(src.colors).copy()
+                if src.has_colors() else np.ones_like(pts) * 0.6)
+
+        pcd_m = o3d.geometry.PointCloud()
+        pcd_m.points = o3d.utility.Vector3dVector(pts)
+        pcd_m.colors = o3d.utility.Vector3dVector(cols)
+
+        cfg = view_angles.get(name, {"angle": 0, "flip_x": False})
+        pcd_centered = center_pointcloud(pcd_m)
+        pcd_rot      = rotate_pointcloud(pcd_centered, cfg["angle"], cfg.get("flip_x", False))
+        pcd_clean    = preprocess_pcd(pcd_rot, voxel_size)
+
+        if fused is None:
+            fused = pcd_clean
+            per_view_fitness[name] = 1.0
+            print(f"  [fusión] {name:12s}: ancla — {len(pcd_clean.points):,} puntos")
+        else:
+            transform, fitness, rmse = register_icp(
+                pcd_clean, fused, max_corr_dist=icp_max_corr_dist
+            )
+            pcd_clean.transform(transform)
+            per_view_fitness[name] = float(fitness)
+            print(f"  [fusión] {name:12s}: ICP fitness={fitness:.2f}  "
+                  f"rmse={rmse*1000:.1f}mm  → {len(pcd_clean.points):,} puntos")
+            if fitness < 0.3:
+                print(f"    ⚠ fitness bajo — revisar el ángulo asumido para '{name}' "
+                      f"en DEFAULT_VIEW_ANGLES")
+            fused = fused + pcd_clean
+            fused = fused.voxel_down_sample(voxel_size)
+
+    fused_clean, _ = fused.remove_statistical_outlier(nb_neighbors=25, std_ratio=1.8)
+    fused_clean.estimate_normals(
+        o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 4, max_nn=30))
+    fused_clean.orient_normals_consistent_tangent_plane(30)
+    print(f"  [fusión] total: {len(fused_clean.points):,} puntos "
+          f"(de {len(names)} vista(s))")
+
+    return {"fused_pcd": fused_clean, "per_view_fitness": per_view_fitness}
+
+
 def reconstruct_from_views(views_data, voxel_size=0.005, poisson_depth=9):
     rotated_pcds = []
     for v in views_data:
