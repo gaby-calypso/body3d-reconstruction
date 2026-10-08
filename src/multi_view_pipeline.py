@@ -63,23 +63,23 @@ _PARALLAX_REF_W, _PARALLAX_REF_H = 1280, 720
 VIEW_CONFIG = {
     "frontal": {
         "d_min": 1410, "d_max": 1790,
-        "x_min": 396,  "x_max": 755,
-        "y_min": 0,    "y_max": 626,
+        "x_min": 198,  "x_max": 378,
+        "y_min": 0,    "y_max": 417,
     },
     "posterior": {
         "d_min": 1180, "d_max": 1720,
-        "x_min": 409,  "x_max": 780,
-        "y_min": 0,    "y_max": 626,
+        "x_min": 205,  "x_max": 390,
+        "y_min": 0,    "y_max": 417,
     },
     "lateral_izq": {
         "d_min": 1090, "d_max": 1490,
-        "x_min": 448,  "x_max": 716,
-        "y_min": 0,    "y_max": 669,
+        "x_min": 224,  "x_max": 358,
+        "y_min": 0,    "y_max": 446,
     },
     "lateral_der": {
         "d_min": 930,  "d_max": 1750,
-        "x_min": 422,  "x_max": 729,
-        "y_min": 0,    "y_max": 626,
+        "x_min": 211,  "x_max": 365,
+        "y_min": 0,    "y_max": 417,
     },
 }
 

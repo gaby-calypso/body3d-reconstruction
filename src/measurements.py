@@ -33,10 +33,10 @@ from typing import Optional
 
 
 # ── Parámetros intrínsecos D455 ───────────────────────────────────────────────
-FX = 674.42
-FY = 649.46
-CX = 640.00
-CY = 360.00
+FX = 337.21
+FY = 432.97
+CX = 320.00
+CY = 240.00
 
 # ── Zonas de medición calibradas manualmente ──────────────────────────────────
 # Determinadas empíricamente del análisis de distribución de la silueta.
