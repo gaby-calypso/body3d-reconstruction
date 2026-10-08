@@ -11,11 +11,13 @@ import sys
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtGui import QFont
 from src.gui.main_window import MainWindow, FONT_FAMILY
+from src.gui.branding import APP_NAME, app_icon
 
 
 def main():
     app = QApplication(sys.argv)
-    app.setApplicationName("Body3D Reconstruction")
+    app.setApplicationName(APP_NAME)
+    app.setWindowIcon(app_icon())
     app.setStyle("Fusion")  # base consistente entre plataformas para que la QSS se vea igual en todos lados
     app.setFont(QFont(FONT_FAMILY.split(",")[0].strip(' "'), 10))
     window = MainWindow()

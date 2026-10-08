@@ -105,7 +105,7 @@ def generate_pdf(img_path: str,
         leftMargin=2*cm, rightMargin=2*cm,
         topMargin=2*cm,  bottomMargin=2*cm,
         title="Reporte de Composición Corporal 3D",
-        author="Body3D Reconstruction System"
+        author="SomaRecon 3D"
     )
 
     story = []
@@ -372,7 +372,7 @@ def generate_pdf(img_path: str,
 
     story.append(Paragraph(
         "Este reporte fue generado de forma automática por el sistema "
-        "Body3D Reconstruction y tiene carácter orientativo. No sustituye "
+        "SomaRecon 3D y tiene carácter orientativo. No sustituye "
         "la evaluación clínica profesional.",
         style_note
     ))
@@ -380,7 +380,7 @@ def generate_pdf(img_path: str,
     story.append(HRFlowable(width="100%", thickness=1,
                               color=BORDER, spaceBefore=12))
     story.append(Paragraph(
-        f"Body3D Reconstruction System — {datetime.now().strftime('%Y')}",
+        f"SomaRecon 3D — {datetime.now().strftime('%Y')}",
         ParagraphStyle("footer", fontSize=8, textColor=GRAY,
                         alignment=TA_CENTER)
     ))

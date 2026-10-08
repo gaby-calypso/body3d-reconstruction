@@ -1,7 +1,7 @@
 """
 main_window.py
 --------------
-GUI Body3D Reconstruction — 3 páginas con navegación por tabs.
+GUI SomaRecon 3D — 3 páginas con navegación por tabs.
 
 Página 1 — Captura:    selector de vistas, carga RGB+depth, sliders ROI/profundidad, datos paciente
 Página 2 — Mediciones: líneas de medición ajustables, tabla en tiempo real, reconstrucción 3D
@@ -17,45 +17,64 @@ from PyQt5.QtWidgets import (
     QSlider, QLineEdit, QComboBox, QGridLayout, QVBoxLayout,
     QHBoxLayout, QSizePolicy, QFrame, QProgressBar, QMessageBox,
     QFileDialog, QScrollArea, QStackedWidget, QSpinBox, QGroupBox,
-    QTabWidget, QDialog, QInputDialog, QCheckBox
+    QTabWidget, QDialog, QInputDialog, QCheckBox, QButtonGroup
 )
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
-from PyQt5.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QFont
+from PyQt5.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QFont, QIcon
 from PyQt5.QtWidgets import QGraphicsDropShadowEffect
 
-# ── Paleta ─────────────────────────────────────────────────────────────────────
-# Paleta clínico-profesional: superficies frías y neutras, acentos con
-# significado semántico consistente en toda la app (ver USO más abajo).
-TEAL          = "#0E7C66"   # acciones principales / éxito
-TEAL_LIGHT    = "#E3F5F0"
-TEAL_DARK     = "#0A5D4C"
-CORAL         = "#C2410C"   # detener / cancelar / advertencia
-CORAL_LIGHT   = "#FBEAE3"
-PURPLE        = "#5B4FE0"   # navegación hacia adelante
-PURPLE_LIGHT  = "#EEECFD"
-BLUE          = "#2969C9"   # acciones de IA (landmarks / SMPL)
-BLUE_LIGHT    = "#E7F0FC"
+from src.gui.branding import (
+    APP_NAME, app_icon, app_icon_pixmap, line_icon, icon_size
+)
 
-BG_MAIN       = "#F3F5F8"   # fondo general de la ventana
+# ── Paleta ─────────────────────────────────────────────────────────────────────
+# Identidad SomaRecon 3D: verde petróleo de marca, superficies frías y neutras,
+# naranja para "mayor que la referencia" y azul para "menor que la referencia".
+TEAL          = "#0B4F43"   # color de marca / acciones principales
+TEAL_LIGHT    = "#D9ECE7"
+TEAL_DARK     = "#083F35"
+TEAL_MID      = "#17685A"   # pasos inactivos sobre la cabecera
+MINT          = "#8FE3CD"   # acento claro sobre fondos oscuros
+CORAL         = "#C2540F"   # exceso / detener / advertencia
+CORAL_LIGHT   = "#FBEBDD"
+PURPLE        = "#14232A"   # navegación hacia adelante (tinta)
+PURPLE_LIGHT  = "#E6EBEE"
+BLUE          = "#1F5F9E"   # déficit / acciones de IA (landmarks)
+BLUE_LIGHT    = "#E4EEF8"
+INK           = "#14232A"
+
+BG_MAIN       = "#EEF2F3"   # fondo general de la ventana
 BG_PANEL      = "#FFFFFF"   # tarjetas / paneles elevados
-BG_CARD       = "#F1F3F7"   # inputs y superficies internas
-BG_CARD_HOVER = "#E7EAF0"
-BORDER        = "#E1E5EB"
-BORDER_STRONG = "#C7CDD6"
-TEXT_PRI      = "#171A21"
-TEXT_SEC      = "#5B6270"
-TEXT_HINT     = "#9AA1AC"
+BG_CARD       = "#F4F7F8"   # inputs y superficies internas
+BG_CARD_HOVER = "#E6EBEE"
+BG_VIEWER     = "#0F1C22"   # visor oscuro de imágenes
+BORDER        = "#DDE3E6"
+BORDER_STRONG = "#C3CCD1"
+TEXT_PRI      = "#14232A"
+TEXT_SEC      = "#36464E"
+TEXT_HINT     = "#6B7A83"
 TEXT_ON_DARK  = "#FFFFFF"
+TEXT_ON_VIEWER = "#C5D2D8"
 
 SUCCESS = TEAL
 DANGER  = CORAL
 INFO    = BLUE
 
-RADIUS    = 10
-RADIUS_SM = 7
-FONT_FAMILY = '"Segoe UI", "Inter", "Helvetica Neue", Arial, sans-serif'
+RADIUS    = 14
+RADIUS_SM = 9
+FONT_FAMILY = '"Figtree", "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif'
+FONT_MONO   = '"IBM Plex Mono", "JetBrains Mono", "Consolas", "Menlo", monospace'
 
 ZONES = ["cuello", "pecho", "brazo", "cintura", "cadera", "muslo", "rodilla"]
+
+VIEW_LABELS = {
+    "frontal": "Frontal", "posterior": "Posterior",
+    "lateral_izq": "Lateral izq.", "lateral_der": "Lateral der.",
+}
+VIEW_TITLES = {
+    "frontal": "Vista frontal", "posterior": "Vista posterior",
+    "lateral_izq": "Vista lateral izquierda", "lateral_der": "Vista lateral derecha",
+}
 
 # Carpeta raíz del repositorio (main_window.py está en src/gui/, subimos 2 niveles)
 PROJECT_ROOT   = Path(__file__).resolve().parents[2]
@@ -84,53 +103,65 @@ def section_label(text):
     l = QLabel(text.upper())
     l.setStyleSheet(
         f"font-size:11px;font-weight:600;color:{TEXT_HINT};letter-spacing:0.6px;"
+        f"background:transparent;border:none;"
     )
     return l
 
-def btn(text, fg=TEXT_PRI, bg=BG_CARD, variant="soft"):
+def btn(text, fg=TEXT_PRI, bg=BG_PANEL, variant="soft", icon=None, icon_right=False):
     """Botón de la app.
 
-    variant="soft"  → superficie tenue con texto de color (estilo por defecto,
-                        usado para acciones secundarias/contextuales).
-    variant="solid" → botón sólido relleno de color, para la acción principal
-                        de cada pantalla (mayor peso visual).
+    variant="soft"  → superficie clara con texto de color (acciones
+                        secundarias). Sobre blanco lleva un borde fino.
+    variant="solid" → botón relleno de color, para la acción principal de
+                        cada pantalla (mayor peso visual).
+    icon            → nombre de un icono de línea de branding.line_icon.
     """
     b = QPushButton(text)
     if variant == "solid":
-        base   = bg if bg != BG_CARD else fg
-        hover  = _shade(base, 0.88)
-        press  = _shade(base, 0.78)
+        base   = bg if bg not in (BG_CARD, BG_PANEL) else fg
+        hover  = _shade(base, 0.86)
+        press  = _shade(base, 0.74)
+        icon_color = TEXT_ON_DARK
         b.setStyleSheet(f"""
             QPushButton{{background:{base};color:{TEXT_ON_DARK};border:none;
-                border-radius:{RADIUS_SM}px;padding:9px 10px;font-size:13px;font-weight:600;}}
+                border-radius:{RADIUS_SM}px;padding:10px 14px;font-size:14px;font-weight:700;}}
             QPushButton:hover{{background:{hover};}}
             QPushButton:pressed{{background:{press};}}
             QPushButton:disabled{{background:{BORDER};color:{TEXT_HINT};}}
         """)
     else:
-        hover = _shade(bg, 0.94)
-        press = _shade(bg, 0.88)
+        hover = _shade(bg, 0.95)
+        press = _shade(bg, 0.90)
+        border = BORDER_STRONG if bg in (BG_CARD, BG_PANEL) else "transparent"
+        icon_color = fg
         b.setStyleSheet(f"""
-            QPushButton{{background:{bg};color:{fg};border:1px solid transparent;
-                border-radius:{RADIUS_SM}px;padding:8px 10px;font-size:13px;font-weight:600;}}
+            QPushButton{{background:{bg};color:{fg};border:1px solid {border};
+                border-radius:{RADIUS_SM}px;padding:9px 14px;font-size:14px;font-weight:600;}}
             QPushButton:hover{{background:{hover};}}
             QPushButton:pressed{{background:{press};}}
             QPushButton:disabled{{background:{BG_CARD};color:{TEXT_HINT};border-color:{BORDER};}}
         """)
+    if icon:
+        b.setIcon(line_icon(icon, icon_color))
+        b.setIconSize(icon_size(18))
+        if icon_right:
+            b.setLayoutDirection(Qt.RightToLeft)
     b.setCursor(Qt.PointingHandCursor)
-    b.setMinimumHeight(34)
+    b.setMinimumHeight(44)
     return b
 
 def input_style():
-    return (f"QWidget{{background:{BG_CARD};border:1px solid {BORDER};"
-            f"border-radius:{RADIUS_SM}px;padding:5px 10px;font-size:14px;color:{TEXT_PRI};}}"
-            f"QWidget:hover{{border-color:{BORDER_STRONG};}}"
-            f"QWidget:focus{{border-color:{TEAL};background:{BG_PANEL};}}")
+    return (f"QWidget{{background:{BG_PANEL};border:1px solid {BORDER_STRONG};"
+            f"border-radius:{RADIUS_SM}px;padding:8px 10px;font-size:14px;color:{TEXT_PRI};}}"
+            f"QWidget:hover{{border-color:{TEXT_HINT};}}"
+            f"QWidget:focus{{border-color:{TEAL};}}")
 
 def labeled(label_text, widget):
     c = QWidget(); l = QVBoxLayout(c)
-    l.setContentsMargins(0,0,0,0); l.setSpacing(4)
-    lb = QLabel(label_text); lb.setStyleSheet(f"font-size:12px;color:{TEXT_SEC};font-weight:500;")
+    l.setContentsMargins(0,0,0,0); l.setSpacing(5)
+    lb = QLabel(label_text)
+    lb.setStyleSheet(f"font-size:13px;color:{TEXT_SEC};font-weight:500;"
+                     f"background:transparent;border:none;")
     l.addWidget(lb); l.addWidget(widget); return c
 
 def card_panel(radius=RADIUS, bg=BG_PANEL, border=True):
@@ -144,9 +175,195 @@ def elevate(widget, blur=24, y_offset=4, alpha=28):
     shadow.setBlurRadius(blur)
     shadow.setXOffset(0)
     shadow.setYOffset(y_offset)
-    shadow.setColor(QColor(23, 26, 33, alpha))
+    shadow.setColor(QColor(20, 35, 42, alpha))
     widget.setGraphicsEffect(shadow)
     return widget
+
+_card_seq = [0]
+
+def card(margins=(20, 20, 20, 20), spacing=12):
+    """Tarjeta blanca con sombra. Devuelve (QFrame, QVBoxLayout).
+
+    Usa un objectName único para que el fondo/borde NO se herede a los
+    widgets hijos (un stylesheet sin selector se aplicaría a todos ellos).
+    """
+    _card_seq[0] += 1
+    f = QFrame()
+    f.setObjectName(f"card{_card_seq[0]}")
+    f.setStyleSheet(
+        f"#{f.objectName()}{{background:{BG_PANEL};border:none;border-radius:{RADIUS}px;}}"
+    )
+    elevate(f, blur=18, y_offset=2, alpha=22)
+    lay = QVBoxLayout(f)
+    lay.setContentsMargins(*margins); lay.setSpacing(spacing)
+    return f, lay
+
+def text_label(text, size=14, color=TEXT_PRI, weight=400, mono=False, wrap=False):
+    l = QLabel(text)
+    fam = f"font-family:{FONT_MONO};" if mono else ""
+    l.setStyleSheet(f"{fam}font-size:{size}px;font-weight:{weight};color:{color};"
+                    f"background:transparent;border:none;")
+    l.setWordWrap(wrap)
+    return l
+
+def card_title(text, icon=None):
+    """Título de tarjeta con icono de línea opcional. Devuelve un QWidget."""
+    w = QWidget(); w.setStyleSheet("background:transparent;")
+    h = QHBoxLayout(w); h.setContentsMargins(0,0,0,0); h.setSpacing(8)
+    if icon:
+        ic = QLabel(); ic.setPixmap(line_icon(icon, TEAL).pixmap(icon_size(20)))
+        ic.setStyleSheet("background:transparent;border:none;")
+        h.addWidget(ic)
+    h.addWidget(text_label(text, 16, TEXT_PRI, 700))
+    h.addStretch()
+    return w
+
+def thin_bar(color=TEAL):
+    """Barra de progreso fina (8 px) sin texto."""
+    bar = QProgressBar(); bar.setRange(0, 100); bar.setValue(0)
+    bar.setTextVisible(False); bar.setFixedHeight(8)
+    set_bar_color(bar, color)
+    return bar
+
+def set_bar_color(bar, color):
+    bar.setStyleSheet(f"""
+        QProgressBar{{background:#E6EBEE;border-radius:4px;border:none;}}
+        QProgressBar::chunk{{background:{color};border-radius:4px;}}
+    """)
+
+
+class Segmented(QFrame):
+    """Control segmentado (grupo de botones excluyentes), p. ej. RGB | Profundidad."""
+
+    changed = pyqtSignal(int)
+
+    def __init__(self, labels=()):
+        super().__init__()
+        self.setObjectName("segmented")
+        self.setStyleSheet(
+            "#segmented{background:#DBE2E5;border-radius:10px;border:none;}"
+        )
+        self._lay = QHBoxLayout(self)
+        self._lay.setContentsMargins(4, 4, 4, 4); self._lay.setSpacing(4)
+        self._group = QButtonGroup(self); self._group.setExclusive(True)
+        self._buttons = []
+        self.set_options(labels)
+
+    def set_options(self, labels):
+        for b in self._buttons:
+            self._group.removeButton(b); b.setParent(None); b.deleteLater()
+        self._buttons = []
+        for i, text in enumerate(labels):
+            b = QPushButton(text)
+            b.setCheckable(True)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setMinimumHeight(38)
+            b.setStyleSheet(f"""
+                QPushButton{{background:transparent;color:{TEXT_SEC};border:none;
+                    border-radius:8px;padding:6px 16px;font-size:14px;font-weight:600;}}
+                QPushButton:hover:!checked{{background:#CFD8DC;}}
+                QPushButton:checked{{background:{BG_PANEL};color:{TEXT_PRI};}}
+            """)
+            b.clicked.connect(lambda _, idx=i: self.changed.emit(idx))
+            self._group.addButton(b, i)
+            self._lay.addWidget(b)
+            self._buttons.append(b)
+        if self._buttons:
+            self._buttons[0].setChecked(True)
+
+    def set_current(self, idx):
+        if 0 <= idx < len(self._buttons):
+            self._buttons[idx].setChecked(True)
+
+
+def _bgr_to_pixmap(img_bgr):
+    rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    rgb = np.ascontiguousarray(rgb)
+    h, w, c = rgb.shape
+    qi = QImage(rgb.data, w, h, c * w, QImage.Format_RGB888)
+    return QPixmap.fromImage(qi.copy())
+
+
+class _ViewSlot:
+    """Guarda la última imagen de una vista (RGB o profundidad).
+
+    Sustituye a los antiguos widgets por vista: el resto del código sigue
+    llamando a `.set_image_array(img)`, y la página decide si esa imagen se
+    muestra en el visor grande (según la vista y el modo activos).
+    """
+
+    def __init__(self, on_change):
+        self.array = None
+        self._on_change = on_change
+
+    def set_image_array(self, img_bgr):
+        self.array = img_bgr
+        self._on_change()
+
+
+class ViewThumb(QFrame):
+    """Miniatura de una vista en la pantalla de Captura."""
+
+    clicked = pyqtSignal(str)
+
+    def __init__(self, name):
+        super().__init__()
+        self._name = name
+        self.setObjectName("thumb")
+        self.setCursor(Qt.PointingHandCursor)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(8, 8, 8, 8); lay.setSpacing(6)
+        self.img = QLabel("Pendiente")
+        self.img.setAlignment(Qt.AlignCenter)
+        self.img.setFixedHeight(84)
+        lay.addWidget(self.img)
+        row = QHBoxLayout(); row.setSpacing(6)
+        row.addWidget(text_label(VIEW_LABELS.get(name, name), 14, TEXT_PRI, 700))
+        row.addStretch()
+        self.check = QLabel()
+        self.check.setFixedSize(22, 22)
+        self.check.setAlignment(Qt.AlignCenter)
+        self.check.setPixmap(line_icon("check", "#FFFFFF", 14, 3.5).pixmap(icon_size(14)))
+        self.check.setStyleSheet(f"background:{TEAL};border-radius:11px;border:none;")
+        self.check.setVisible(False)
+        row.addWidget(self.check)
+        lay.addLayout(row)
+        self._has_image = False
+        self.set_state(active=False, done=False)
+
+    def set_image(self, img_bgr):
+        pm = _bgr_to_pixmap(img_bgr).scaledToHeight(84, Qt.SmoothTransformation)
+        self.img.setPixmap(pm)
+        self._has_image = True
+
+    def clear_image(self):
+        self.img.setPixmap(QPixmap())
+        self._has_image = False
+
+    def set_state(self, active, done):
+        self.check.setVisible(done)
+        if active:
+            border = f"2px solid {TEAL}"
+        elif done:
+            border = f"1px solid {BORDER_STRONG}"
+        else:
+            border = f"1px dashed {TEXT_HINT}"
+        self.setStyleSheet(
+            f"#thumb{{background:{BG_PANEL};border:{border};border-radius:12px;}}"
+        )
+        if self._has_image:
+            self.img.setStyleSheet("background:#22343D;border-radius:8px;border:none;")
+        else:
+            self.img.setText("Capturando" if active else "Pendiente")
+            bg, fg = (TEAL_LIGHT, TEAL) if active else (BG_MAIN, TEXT_SEC)
+            self.img.setStyleSheet(
+                f"background:{bg};color:{fg};border-radius:8px;border:none;"
+                f"font-size:13px;font-weight:600;"
+            )
+
+    def mousePressEvent(self, e):
+        self.clicked.emit(self._name)
+        super().mousePressEvent(e)
 
 
 # ── Estado compartido ──────────────────────────────────────────────────────────
@@ -204,22 +421,35 @@ STATE = AppState()
 
 # ── Widget imagen con overlay ──────────────────────────────────────────────────
 class ImageWithOverlay(QLabel):
-    """QLabel que acepta líneas horizontales de medición superpuestas."""
+    """QLabel que acepta líneas horizontales de medición superpuestas.
 
-    def __init__(self):
+    dark=True → visor oscuro con degradado (pantallas de Captura y Mediciones).
+    """
+
+    def __init__(self, dark=False):
         super().__init__()
         self.setAlignment(Qt.AlignCenter)
-        self.setStyleSheet(f"background:{BG_CARD};border-radius:6px;")
+        if dark:
+            self.setStyleSheet(
+                "background:qradialgradient(cx:0.5,cy:0.38,radius:0.85,fx:0.5,fy:0.38,"
+                f"stop:0 #2C4350,stop:1 {BG_VIEWER});border-radius:16px;"
+                f"color:{TEXT_ON_VIEWER};font-size:15px;font-weight:500;"
+            )
+        else:
+            self.setStyleSheet(f"background:{BG_CARD};border-radius:6px;")
         self.setMinimumSize(200, 200)
         self._lines   = []
         self._pixmap_base = None
 
     def set_image_array(self, img_bgr: np.ndarray):
-        rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-        h, w, c = rgb.shape
-        qi = QImage(rgb.data, w, h, c*w, QImage.Format_RGB888)
-        self._pixmap_base = QPixmap.fromImage(qi)
+        self._pixmap_base = _bgr_to_pixmap(img_bgr)
         self._redraw()
+
+    def clear_image(self, text=""):
+        """Quita la imagen y muestra un texto de ayuda en su lugar."""
+        self._pixmap_base = None
+        self.setPixmap(QPixmap())
+        self.setText(text)
 
     def set_lines(self, lines):
         """lines: list of (y_norm 0-1, color_hex, label_str)"""
@@ -229,8 +459,9 @@ class ImageWithOverlay(QLabel):
     def _redraw(self):
         if self._pixmap_base is None:
             return
+        pad = 24
         pix = self._pixmap_base.scaled(
-            self.width(), self.height(),
+            max(10, self.width() - pad), max(10, self.height() - pad),
             Qt.KeepAspectRatio, Qt.SmoothTransformation
         )
         result = QPixmap(pix.size())
@@ -385,109 +616,162 @@ class Page1Capture(QWidget):
         self._build()
 
     def _build(self):
+        self._active_view = "frontal"
+        self._mode        = "rgb"
+        self._thumbs      = {}
+        self._roi_shape   = None
+
         root = QHBoxLayout(self)
-        root.setContentsMargins(12,12,12,12)
-        root.setSpacing(10)
+        root.setContentsMargins(24, 20, 24, 20)
+        root.setSpacing(20)
 
-        left = QWidget(); left.setFixedWidth(284)
-        left.setStyleSheet(card_panel())
-
-        elevate(left, blur=20, y_offset=2, alpha=10)
-        ll = QVBoxLayout(left)
-        ll.setContentsMargins(12,12,12,12); ll.setSpacing(8)
-
-        ll.addWidget(section_label("Número de vistas"))
-        self.cmb_views = QComboBox()
-        self.cmb_views.addItems(["1 vista (frontal)",
-                                  "2 vistas (frontal + posterior)",
-                                  "3 vistas (+ lateral izq.)",
-                                  "4 vistas (completo)"])
-        self.cmb_views.setStyleSheet(input_style())
-        self.cmb_views.currentIndexChanged.connect(self._on_n_views_changed)
-        ll.addWidget(self.cmb_views)
-
-        ll.addWidget(hline())
-        ll.addWidget(section_label("Datos del paciente"))
+        # ── Columna izquierda: datos del paciente ───────────────────────────
+        left, ll = card()
+        left.setFixedWidth(300)
+        ll.addWidget(card_title("Datos del paciente", "user"))
 
         self.inp_name = QLineEdit()
         self.inp_name.setPlaceholderText("Nombre del paciente")
         self.inp_name.setStyleSheet(input_style())
         ll.addWidget(labeled("Nombre", self.inp_name))
 
-        r1 = QHBoxLayout()
+        r1 = QHBoxLayout(); r1.setSpacing(12)
         self.cmb_sex = QComboBox()
         self.cmb_sex.addItems(["Femenino","Masculino"])
-        self.cmb_sex.setStyleSheet(input_style())
         self.inp_age = QLineEdit("30"); self.inp_age.setStyleSheet(input_style())
         r1.addWidget(labeled("Sexo", self.cmb_sex))
         r1.addWidget(labeled("Edad", self.inp_age))
         ll.addLayout(r1)
 
-        r2 = QHBoxLayout()
+        r2 = QHBoxLayout(); r2.setSpacing(12)
         self.inp_weight = QLineEdit("65.0"); self.inp_weight.setStyleSheet(input_style())
         self.inp_height = QLineEdit("1.65"); self.inp_height.setStyleSheet(input_style())
         r2.addWidget(labeled("Peso (kg)", self.inp_weight))
         r2.addWidget(labeled("Talla (m)", self.inp_height))
         ll.addLayout(r2)
 
-        bf_row = QHBoxLayout()
+        bf_head = QHBoxLayout()
+        bf_head.addWidget(text_label("% grasa corporal", 13, TEXT_SEC, 500))
+        bf_head.addStretch()
+        self.lbl_bf = text_label("25 %", 14, TEXT_PRI, 600, mono=True)
+        bf_head.addWidget(self.lbl_bf)
+        ll.addLayout(bf_head)
         self.slider_bf = QSlider(Qt.Horizontal); self.slider_bf.setRange(5,45); self.slider_bf.setValue(25)
-        self.lbl_bf = QLabel("25%"); self.lbl_bf.setFixedWidth(32)
-        self.lbl_bf.setStyleSheet(f"font-size:14px;color:{TEXT_PRI};")
-        self.slider_bf.valueChanged.connect(lambda v: self.lbl_bf.setText(f"{v}%"))
-        bf_row.addWidget(self.slider_bf); bf_row.addWidget(self.lbl_bf)
-        ll.addWidget(labeled("% grasa corporal", QWidget()))
-        ll.addLayout(bf_row)
+        self.slider_bf.setMinimumHeight(28)
+        self.slider_bf.valueChanged.connect(lambda v: self.lbl_bf.setText(f"{v} %"))
+        ll.addWidget(self.slider_bf)
 
-        ll.addWidget(hline())
-
-        self.btn_cam_start = btn("Iniciar cámara", TEAL, TEAL_LIGHT)
-        self.btn_cam_stop  = btn("Detener cámara", CORAL, CORAL_LIGHT)
-        self.btn_cam_stop.setEnabled(False)
-        self.btn_cam_start.clicked.connect(self._start_camera)
-        self.btn_cam_stop.clicked.connect(self._stop_camera)
-        ll.addWidget(self.btn_cam_start)
-        ll.addWidget(self.btn_cam_stop)
-
-        # Selector de la vista a la que se dirige el streaming/captura actual
-        # (relevante cuando hay 2+ vistas seleccionadas: permite apuntar
-        # la cámara a "frontal", luego cambiar a "posterior", etc.)
-        self.cmb_cam_view = QComboBox()
-        self.cmb_cam_view.setStyleSheet(input_style())
-        self.cmb_cam_view.addItems(STATE.view_names)
-        self.cmb_cam_view.currentTextChanged.connect(self._on_cam_view_changed)
-        ll.addWidget(labeled("Vista actual de la cámara", self.cmb_cam_view))
-
-        self.btn_capture = btn("Capturar frame", TEAL, TEAL_LIGHT)
-        self.btn_capture.setEnabled(False)
-        self.btn_capture.clicked.connect(self._capture_frame)
-        ll.addWidget(self.btn_capture)
-
-        self.btn_import = btn("Importar imágenes")
-        self.btn_import.clicked.connect(self._import_images)
-        ll.addWidget(self.btn_import)
-
-        self.lbl_status = QLabel("En espera")
-        self.lbl_status.setStyleSheet(f"font-size:13px;color:{TEXT_HINT};")
-        self.lbl_status.setWordWrap(True)
-        ll.addWidget(self.lbl_status)
-
+        self.cmb_views = QComboBox()
+        self.cmb_views.addItems(["1 vista (frontal)",
+                                  "2 vistas (frontal + posterior)",
+                                  "3 vistas (+ lateral izq.)",
+                                  "4 vistas (completo)"])
+        self.cmb_views.currentIndexChanged.connect(self._on_n_views_changed)
+        ll.addWidget(labeled("Número de vistas", self.cmb_views))
         ll.addStretch()
-
-        self.btn_next = btn("Continuar a Mediciones →", PURPLE, PURPLE, variant="solid")
-        self.btn_next.clicked.connect(self._save_patient_and_next)
-        ll.addWidget(self.btn_next)
-
         root.addWidget(left)
 
-        self.center_scroll = QScrollArea()
-        self.center_scroll.setWidgetResizable(True)
-        self.center_scroll.setStyleSheet("border:none;background:transparent;")
-        self.center_widget = QWidget()
-        self.center_layout = QVBoxLayout(self.center_widget)
-        self.center_layout.setSpacing(12)
-        self.center_scroll.setWidget(self.center_widget)
-        root.addWidget(self.center_scroll, stretch=1)
+        # ── Centro: visor grande + miniaturas ───────────────────────────────
+        center = QWidget()
+        cv = QVBoxLayout(center)
+        cv.setContentsMargins(0, 0, 0, 0); cv.setSpacing(14)
+
+        head = QHBoxLayout()
+        self.lbl_view_title = text_label("Vista frontal", 24, TEXT_PRI, 700)
+        head.addWidget(self.lbl_view_title)
+        head.addStretch()
+        self.seg_mode = Segmented(["RGB", "Profundidad"])
+        self.seg_mode.changed.connect(self._on_mode_changed)
+        head.addWidget(self.seg_mode)
+        cv.addLayout(head)
+
+        self.viewer = ImageWithOverlay(dark=True)
+        self.viewer.setMinimumHeight(260)
+        self.viewer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        cv.addWidget(self.viewer, stretch=1)
+
+        self.thumb_row = QHBoxLayout()
+        self.thumb_row.setSpacing(12)
+        cv.addLayout(self.thumb_row)
+        root.addWidget(center, stretch=1)
+
+        # ── Columna derecha: acciones de captura ────────────────────────────
+        right = QWidget(); right.setFixedWidth(300)
+        rv = QVBoxLayout(right)
+        rv.setContentsMargins(0, 0, 0, 0); rv.setSpacing(14)
+
+        cap, cl = card()
+        cap_head = QHBoxLayout()
+        cap_head.addWidget(text_label("Captura", 16, TEXT_PRI, 700))
+        cap_head.addStretch()
+        self.lbl_progress = text_label("0 de 1 vistas", 13, TEXT_SEC, 500)
+        cap_head.addWidget(self.lbl_progress)
+        cl.addLayout(cap_head)
+        self.bar_progress = thin_bar(TEAL)
+        cl.addWidget(self.bar_progress)
+
+        self.btn_capture = btn("Capturar vista", TEAL, TEAL, variant="solid", icon="camera")
+        self.btn_capture.setMinimumHeight(52)
+        self.btn_capture.setEnabled(False)
+        self.btn_capture.clicked.connect(self._capture_frame)
+        cl.addWidget(self.btn_capture)
+
+        self.btn_import = btn("Importar imágenes", icon="upload")
+        self.btn_import.clicked.connect(self._import_images)
+        cl.addWidget(self.btn_import)
+
+        self.btn_cam_start = btn("Iniciar cámara", icon="play")
+        self.btn_cam_stop  = btn("Detener cámara", CORAL, BG_PANEL, icon="stop")
+        self.btn_cam_stop.setEnabled(False)
+        self.btn_cam_stop.setVisible(False)
+        self.btn_cam_start.clicked.connect(self._start_camera)
+        self.btn_cam_stop.clicked.connect(self._stop_camera)
+        cl.addWidget(self.btn_cam_start)
+        cl.addWidget(self.btn_cam_stop)
+        rv.addWidget(cap)
+
+        # Ajustes de región (ROI) y profundidad de la vista activa, plegables
+        roi_card, rl = card(margins=(20, 12, 20, 12), spacing=8)
+        self.btn_roi_toggle = QPushButton("Ajustes de región y profundidad")
+        self.btn_roi_toggle.setCheckable(True)
+        self.btn_roi_toggle.setCursor(Qt.PointingHandCursor)
+        self.btn_roi_toggle.setIcon(line_icon("sliders", TEXT_PRI))
+        self.btn_roi_toggle.setIconSize(icon_size(18))
+        self.btn_roi_toggle.setMinimumHeight(40)
+        self.btn_roi_toggle.setStyleSheet(
+            f"QPushButton{{background:transparent;border:none;text-align:left;"
+            f"font-size:14px;font-weight:600;color:{TEXT_PRI};padding:4px 0;}}"
+            f"QPushButton:hover{{color:{TEAL};}}"
+        )
+        rl.addWidget(self.btn_roi_toggle)
+        self.roi_box = QWidget()
+        self.roi_box.setStyleSheet("background:transparent;")
+        self.roi_grid = QGridLayout(self.roi_box)
+        self.roi_grid.setContentsMargins(0, 0, 0, 4)
+        self.roi_grid.setHorizontalSpacing(8); self.roi_grid.setVerticalSpacing(6)
+        self.roi_box.setVisible(False)
+        self.btn_roi_toggle.toggled.connect(self.roi_box.setVisible)
+        rl.addWidget(self.roi_box)
+        rv.addWidget(roi_card)
+
+        self.lbl_status = text_label("En espera", 13, TEXT_SEC, 400, wrap=True)
+        rv.addWidget(self.lbl_status)
+        rv.addStretch()
+
+        self.btn_next = btn("Continuar a Mediciones", INK, INK, variant="solid",
+                            icon="arrow-right", icon_right=True)
+        self.btn_next.setMinimumHeight(52)
+        self.btn_next.clicked.connect(self._save_patient_and_next)
+        rv.addWidget(self.btn_next)
+        root.addWidget(right)
+
+        # Selector interno de "vista actual de la cámara". Ya no se muestra:
+        # la vista activa se elige con las miniaturas, y este combo solo se
+        # mantiene sincronizado para el código de cámara que lo consulta.
+        self.cmb_cam_view = QComboBox(self)
+        self.cmb_cam_view.setVisible(False)
+        self.cmb_cam_view.addItems(STATE.view_names)
+        self.cmb_cam_view.currentTextChanged.connect(self._on_cam_view_changed)
 
         self._on_n_views_changed(0)
 
@@ -497,184 +781,196 @@ class Page1Capture(QWidget):
 
     def _on_n_views_changed(self, idx):
         STATE.set_n_views(idx + 1)
-        self._rebuild_view_widgets()
-        # Refrescar el combo de "vista actual de la cámara" con las vistas vigentes
+        # Refrescar el combo interno de "vista actual de la cámara"
         if hasattr(self, "cmb_cam_view"):
             self.cmb_cam_view.blockSignals(True)
             self.cmb_cam_view.clear()
             self.cmb_cam_view.addItems(STATE.view_names)
             self.cmb_cam_view.blockSignals(False)
-            self._current_cam_view = STATE.view_names[0]
+        self._rebuild_view_widgets()
 
     def _on_cam_view_changed(self, name):
-        if name:
-            self._current_cam_view = name
+        if name and name != self._active_view:
+            self._set_active_view(name)
+
+    def _on_mode_changed(self, idx):
+        self._mode = "rgb" if idx == 0 else "depth"
+        self._refresh_viewer()
 
     def _rebuild_view_widgets(self):
-        while self.center_layout.count():
-            item = self.center_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+        """Reconstruye las miniaturas y los almacenes de imagen por vista."""
+        while self.thumb_row.count():
+            item = self.thumb_row.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
 
         self._view_widgets = {}
-        self._roi_sliders  = {}
+        self._thumbs       = {}
 
-        grid_container = QWidget()
-        grid_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        outer_grid = QGridLayout(grid_container)
-        outer_grid.setSpacing(8)
-        outer_grid.setContentsMargins(0,0,0,0)
+        for name in STATE.view_names:
+            self._view_widgets[name] = {
+                "rgb":   _ViewSlot(lambda n=name: self._on_slot_changed(n, "rgb")),
+                "depth": _ViewSlot(lambda n=name: self._on_slot_changed(n, "depth")),
+            }
+            thumb = ViewThumb(name)
+            thumb.clicked.connect(self._set_active_view)
+            self.thumb_row.addWidget(thumb, stretch=1)
+            self._thumbs[name] = thumb
 
-        # ── Distribución responsiva según número de vistas ──────────────────
-        # 1 vista  -> ocupa toda la pantalla (1x1)
-        # 2 vistas -> apiladas verticalmente, una arriba y otra abajo,
-        #             cada una ocupando todo el ancho disponible (2 filas x 1 col)
-        # 3 vistas -> 2 arriba (mitad y mitad) + 1 abajo ocupando todo el ancho
-        # 4 vistas -> grid 2x2 clásico, todas del mismo tamaño
-        # En todos los casos las filas/columnas usadas se reparten el espacio
-        # por igual (stretch=1) para no desperdiciar pantalla.
-        n = len(STATE.view_names)
-        if n == 1:
-            positions = [(0, 0, 1, 1)]      # row, col, rowspan, colspan
-            n_rows, n_cols = 1, 1
-        elif n == 2:
-            positions = [(0, 0, 1, 1), (1, 0, 1, 1)]
-            n_rows, n_cols = 2, 1
-        elif n == 3:
-            positions = [(0, 0, 1, 1), (0, 1, 1, 1), (1, 0, 1, 2)]
-            n_rows, n_cols = 2, 2
-        else:  # n == 4
-            positions = [(0, 0, 1, 1), (0, 1, 1, 1), (1, 0, 1, 1), (1, 1, 1, 1)]
-            n_rows, n_cols = 2, 2
+        if self._active_view not in STATE.view_names:
+            self._active_view = STATE.view_names[0]
 
-        for r in range(n_rows):
-            outer_grid.setRowStretch(r, 1)
-        for c in range(n_cols):
-            outer_grid.setColumnStretch(c, 1)
+        # Recuperar las imágenes que ya estaban cargadas para estas vistas
+        for name in STATE.view_names:
+            rgb = STATE.rgbs.get(name)
+            if rgb is not None:
+                self._view_widgets[name]["rgb"].set_image_array(rgb)
+            self._update_overlay(name)
 
-        for idx, name in enumerate(STATE.view_names):
-            row_g, col_g, rspan, cspan = positions[idx]
+        self._set_active_view(self._active_view)
 
-            group = QGroupBox(name.replace("_"," ").capitalize())
-            group.setStyleSheet(f"""
-                QGroupBox{{background:{BG_CARD};border:1px solid {BORDER};
-                    border-radius:{RADIUS_SM}px;margin-top:10px;font-size:13px;
-                    font-weight:700;color:{TEXT_PRI};}}
-                QGroupBox::title{{subcontrol-origin:margin;left:10px;top:-2px;
-                    padding:0 6px;background:{BG_CARD};color:{TEAL_DARK};}}
-            """)
-            gl = QVBoxLayout(group)
-            gl.setContentsMargins(8,14,8,8)
-            gl.setSpacing(6)
+    def _set_active_view(self, name):
+        """Cambia la vista mostrada en el visor (y a la que apunta la cámara)."""
+        if name not in STATE.view_names:
+            return
+        self._active_view      = name
+        self._current_cam_view = name
+        self.lbl_view_title.setText(VIEW_TITLES.get(name, name))
+        self.cmb_cam_view.blockSignals(True)
+        self.cmb_cam_view.setCurrentText(name)
+        self.cmb_cam_view.blockSignals(False)
+        self._build_roi_panel(name)
+        self._refresh_thumbs()
+        self._refresh_viewer()
 
-            img_row = QHBoxLayout()
-            img_row.setSpacing(4)
-            w_rgb = ImageWithOverlay()
-            w_dep = ImageWithOverlay()
-            w_rgb.setMinimumHeight(100)
-            w_dep.setMinimumHeight(100)
-            w_rgb.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-            w_dep.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-            w_rgb.setText("RGB")
-            w_dep.setText("Depth")
+    def _on_slot_changed(self, name, kind):
+        """Llega cada vez que cambia la imagen RGB o de profundidad de una vista."""
+        slot = self._view_widgets.get(name, {}).get(kind)
+        if slot is None:
+            return
+        if kind == "rgb" and name in self._thumbs and slot.array is not None:
+            self._thumbs[name].set_image(slot.array)
+        if self._ensure_roi_scaled(name) and name == self._active_view:
+            self._build_roi_panel(name)
+        self._refresh_thumbs()
+        if name == self._active_view and kind == self._mode:
+            self._refresh_viewer()
 
-            rgb_col = QVBoxLayout()
-            rgb_lbl = QLabel("RGB")
-            rgb_lbl.setStyleSheet(f"font-size:11px;color:{TEXT_HINT};")
-            rgb_col.setSpacing(1); rgb_col.addWidget(rgb_lbl); rgb_col.addWidget(w_rgb)
+    def _refresh_thumbs(self):
+        done_count = 0
+        for name, thumb in self._thumbs.items():
+            done = STATE.rgbs.get(name) is not None
+            done_count += int(done)
+            thumb.set_state(active=(name == self._active_view), done=done)
+        total = max(1, len(self._thumbs))
+        plural = "vista" if total == 1 else "vistas"
+        self.lbl_progress.setText(f"{done_count} de {total} {plural}")
+        self.bar_progress.setValue(int(round(done_count / total * 100)))
 
-            dep_col = QVBoxLayout()
-            dep_lbl = QLabel("Depth")
-            dep_lbl.setStyleSheet(f"font-size:11px;color:{TEXT_HINT};")
-            dep_col.setSpacing(1); dep_col.addWidget(dep_lbl); dep_col.addWidget(w_dep)
+    def _refresh_viewer(self):
+        slot = self._view_widgets.get(self._active_view, {}).get(self._mode)
+        if slot is not None and slot.array is not None:
+            self.viewer.set_image_array(slot.array)
+        else:
+            kind = "RGB" if self._mode == "rgb" else "de profundidad"
+            self.viewer.clear_image(
+                f"Sin imagen {kind} para esta vista.\n"
+                "Inicia la cámara o importa imágenes."
+            )
 
-            img_row.addLayout(rgb_col)
-            img_row.addLayout(dep_col)
-            gl.addLayout(img_row)
+    def _image_size(self, name):
+        """(ancho, alto) de la imagen real de esta vista, o None si no hay."""
+        src = STATE.rgbs.get(name)
+        if src is None:
+            src = STATE.depths.get(name)
+        if src is None:
+            slot = self._view_widgets.get(name, {}).get("rgb")
+            src = slot.array if slot is not None else None
+        if src is None:
+            return None
+        h, w = src.shape[:2]
+        return (w, h)
 
-            roi = STATE.roi_params[name]
-            sliders = {}
-            # Usar el tamaño REAL de la imagen cargada para esta vista, no un
-            # valor fijo. Antes se asumía siempre 1280x720 (resolución típica
-            # de RealSense a la que se calibraron los ROI por defecto), pero
-            # si la imagen importada es de otro tamaño (p.ej. 640x480) el
-            # % del slider se traduce a un píxel equivocado: el mínimo de x2
-            # puede terminar más a la izquierda que x1, y el mínimo de y2
-            # queda más abajo de lo que debería, sin dejar subirlo lo
-            # suficiente. Al usar las dimensiones reales, el % siempre
-            # corresponde al píxel correcto sin importar la resolución.
-            _src_img = STATE.rgbs.get(name)
-            if _src_img is None:
-                _src_img = STATE.depths.get(name)
-            if _src_img is not None:
-                h_img, w_img = _src_img.shape[:2]
-            else:
-                h_img, w_img = 480, 640
+    def _ensure_roi_scaled(self, name):
+        """
+        Los valores por defecto de roi_params (x1/x2/y1/y2) fueron calibrados
+        sobre una imagen de 1280x720. Cuando se conoce el tamaño real de la
+        imagen de esta vista, se reescalan una sola vez para que la región
+        inicial quede en una posición razonable. Devuelve True si reescaló.
+        """
+        size = self._image_size(name)
+        roi  = STATE.roi_params.get(name)
+        if size is None or roi is None:
+            return False
+        prev = roi.get("_scaled_wh")
+        if prev == size:
+            return False
+        ref_w, ref_h = prev if prev else (1280, 720)
+        sx, sy = size[0] / ref_w, size[1] / ref_h
+        roi["x1"] = int(roi["x1"] * sx)
+        roi["x2"] = int(roi["x2"] * sx)
+        roi["y1"] = int(roi["y1"] * sy)
+        roi["y2"] = int(roi["y2"] * sy)
+        roi["_scaled_wh"] = size
+        return True
 
-            # Los valores por defecto de roi_params (x1/x2/y1/y2) fueron
-            # calibrados sobre una imagen de 1280x720. Si la imagen real
-            # cargada tiene otro tamaño, reescalamos esos valores una sola
-            # vez (por vista) para que la caja inicial aparezca en una
-            # posición razonable, en vez de fuera de cuadro.
-            _prev_wh = roi.get("_scaled_wh")
-            if _prev_wh != (w_img, h_img):
-                _ref_w, _ref_h = _prev_wh if _prev_wh else (1280, 720)
-                _sx, _sy = w_img / _ref_w, h_img / _ref_h
-                roi["x1"] = int(roi["x1"] * _sx)
-                roi["x2"] = int(roi["x2"] * _sx)
-                roi["y1"] = int(roi["y1"] * _sy)
-                roi["y2"] = int(roi["y2"] * _sy)
-                roi["_scaled_wh"] = (w_img, h_img)
+    def _build_roi_panel(self, name):
+        """Deslizadores de región (x/y) y profundidad para la vista activa."""
+        while self.roi_grid.count():
+            item = self.roi_grid.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+        self._roi_sliders = {}
 
-            params_def = [
-                ("x1%",  "x1",   int(roi["x1"]/w_img*100), 0,   100),
-                ("x2%",  "x2",   int(roi["x2"]/w_img*100), 0,   100),
-                ("y1%",  "y1",   int(roi["y1"]/h_img*100), 0,   100),
-                ("y2%",  "y2",   int(roi["y2"]/h_img*100), 0,   100),
-                ("dMin", "d_min",roi["d_min"]//10,          50, 250),
-                ("dMax", "d_max",roi["d_max"]//10,          50, 400),
-            ]
+        self._ensure_roi_scaled(name)
+        roi  = STATE.roi_params[name]
+        size = self._image_size(name)
+        # El % de cada deslizador se traduce a píxeles con el tamaño REAL de
+        # la imagen cargada (si aún no hay imagen, se asume 1280x720, que es
+        # la resolución a la que están calibrados los valores por defecto).
+        w_img, h_img = size if size else (1280, 720)
 
-            sgrid = QGridLayout()
-            sgrid.setSpacing(2)
-            sgrid.setContentsMargins(0,0,0,0)
+        params_def = [
+            ("X mín %",       "x1",    int(roi["x1"]/w_img*100), 0,   100),
+            ("X máx %",       "x2",    int(roi["x2"]/w_img*100), 0,   100),
+            ("Y mín %",       "y1",    int(roi["y1"]/h_img*100), 0,   100),
+            ("Y máx %",       "y2",    int(roi["y2"]/h_img*100), 0,   100),
+            ("Prof. mín cm",  "d_min", roi["d_min"]//10,          50, 250),
+            ("Prof. máx cm",  "d_max", roi["d_max"]//10,          50, 400),
+        ]
+        sliders = {}
+        for row_i, (label_txt, key, val, lo, hi) in enumerate(params_def):
+            lbl = text_label(label_txt, 13, TEXT_SEC, 500)
+            sl  = QSlider(Qt.Horizontal)
+            sl.setRange(lo, hi); sl.setValue(val)
+            sl.setMinimumHeight(26)
+            val_lbl = text_label(str(val), 13, TEXT_PRI, 600, mono=True)
+            val_lbl.setFixedWidth(34)
+            val_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
-            for row_i, (label_txt, key, val, lo, hi) in enumerate(params_def):
-                lbl = QLabel(label_txt)
-                lbl.setStyleSheet(f"font-size:11px;color:{TEXT_SEC};min-width:32px;")
-                sl  = QSlider(Qt.Horizontal)
-                sl.setRange(lo, hi); sl.setValue(val)
-                sl.setFixedHeight(16)
-                val_lbl = QLabel(str(val))
-                val_lbl.setFixedWidth(28)
-                val_lbl.setStyleSheet(f"font-size:11px;color:{TEXT_PRI};")
+            def _make_cb(k, vl, nm, w_i=w_img, h_i=h_img):
+                def cb(v):
+                    vl.setText(str(v))
+                    if k in ("x1","x2"):
+                        STATE.roi_params[nm][k] = int(v/100*w_i)
+                    elif k in ("y1","y2"):
+                        STATE.roi_params[nm][k] = int(v/100*h_i)
+                    else:
+                        STATE.roi_params[nm][k] = v * 10
+                    self._update_overlay(nm)
+                return cb
 
-                def _make_cb(k, vl, nm, w_i=w_img, h_i=h_img):
-                    def cb(v):
-                        vl.setText(str(v))
-                        if k in ("x1","x2"):
-                            STATE.roi_params[nm][k] = int(v/100*w_i)
-                        elif k in ("y1","y2"):
-                            STATE.roi_params[nm][k] = int(v/100*h_i)
-                        else:
-                            STATE.roi_params[nm][k] = v * 10
-                        self._update_overlay(nm)
-                    return cb
-
-                sl.valueChanged.connect(_make_cb(key, val_lbl, name))
-                sliders[key] = sl
-                sgrid.addWidget(lbl,     row_i, 0)
-                sgrid.addWidget(sl,      row_i, 1)
-                sgrid.addWidget(val_lbl, row_i, 2)
-
-            gl.addLayout(sgrid)
-
-            group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-            self._view_widgets[name] = {"rgb": w_rgb, "depth": w_dep}
-            self._roi_sliders[name]  = sliders
-            outer_grid.addWidget(group, row_g, col_g, rspan, cspan)
-
-        self.center_layout.addWidget(grid_container, stretch=1)
+            sl.valueChanged.connect(_make_cb(key, val_lbl, name))
+            sliders[key] = sl
+            self.roi_grid.addWidget(lbl,     row_i, 0)
+            self.roi_grid.addWidget(sl,      row_i, 1)
+            self.roi_grid.addWidget(val_lbl, row_i, 2)
+        self.roi_grid.setColumnStretch(1, 1)
+        self._roi_sliders[name] = sliders
 
     def _update_overlay(self, name):
         depth = STATE.depths.get(name)
@@ -709,6 +1005,8 @@ class Page1Capture(QWidget):
         self.timer.start(33)
         self.btn_cam_start.setEnabled(False)
         self.btn_cam_stop.setEnabled(True)
+        self.btn_cam_start.setVisible(False)
+        self.btn_cam_stop.setVisible(True)
         self.btn_capture.setEnabled(True)
         self.lbl_status.setText(f"Cámara activa — {mode}")
         # Respeta la vista que el usuario ya tenía seleccionada en el combo
@@ -719,6 +1017,8 @@ class Page1Capture(QWidget):
         if self.cam: self.cam.stop(); self.cam = None
         self.btn_cam_start.setEnabled(True)
         self.btn_cam_stop.setEnabled(False)
+        self.btn_cam_start.setVisible(True)
+        self.btn_cam_stop.setVisible(False)
         self.btn_capture.setEnabled(False)
         self.lbl_status.setText("Cámara detenida")
 
@@ -1382,18 +1682,56 @@ class Page2Measurements(QWidget):
         self._build()
 
     def _build(self):
+        self._active_view = "frontal"
+
         root = QHBoxLayout(self)
-        root.setContentsMargins(12,12,12,12)
-        root.setSpacing(10)
+        root.setContentsMargins(24, 20, 24, 20)
+        root.setSpacing(20)
 
-        left = QWidget(); left.setFixedWidth(284)
-        left.setStyleSheet(card_panel())
+        # ── Centro: visor grande de la vista activa ─────────────────────────
+        center = QWidget()
+        cv = QVBoxLayout(center)
+        cv.setContentsMargins(0, 0, 0, 0); cv.setSpacing(14)
 
-        elevate(left, blur=20, y_offset=2, alpha=10)
-        ll = QVBoxLayout(left)
-        ll.setContentsMargins(12,12,12,12); ll.setSpacing(6)
+        head = QHBoxLayout()
+        head.addWidget(text_label("Landmarks y zonas de medida", 24, TEXT_PRI, 700))
+        head.addStretch()
+        self.seg_views = Segmented([])
+        self.seg_views.changed.connect(self._on_view_tab)
+        head.addWidget(self.seg_views)
+        cv.addLayout(head)
 
-        ll.addWidget(hline())
+        self.viewer = ImageWithOverlay(dark=True)
+        self.viewer.setMinimumHeight(320)
+        self.viewer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        cv.addWidget(self.viewer, stretch=1)
+
+        under = QHBoxLayout(); under.setSpacing(12)
+        self.btn_mark = btn("Marcar zonas de esta vista", TEAL, TEAL_LIGHT, icon="target")
+        self.btn_mark.clicked.connect(lambda: self._open_zone_marker(self._active_view))
+        under.addWidget(self.btn_mark)
+        under.addWidget(text_label(
+            "Se muestra el mapa de profundidad recortado a la región elegida en Captura.",
+            13, TEXT_SEC, 400, wrap=True), stretch=1)
+        cv.addLayout(under)
+        root.addWidget(center, stretch=1)
+
+        # ── Columna derecha: proceso y medidas ──────────────────────────────
+        right = QWidget(); right.setFixedWidth(360)
+        rv = QVBoxLayout(right)
+        rv.setContentsMargins(0, 0, 0, 0); rv.setSpacing(14)
+
+        proc, pl = card()
+        pl.addWidget(card_title("Proceso", "layers"))
+
+        self.btn_landmarks_p2 = btn("Detectar landmarks (MediaPipe)", icon="target")
+        self.btn_landmarks_p2.clicked.connect(self._detect_landmarks_p2)
+        pl.addWidget(self.btn_landmarks_p2)
+
+        self.btn_run = btn("Ejecutar pipeline", TEAL, TEAL, variant="solid", icon="play")
+        self.btn_run.setMinimumHeight(52)
+        self.btn_run.clicked.connect(self._run_pipeline)
+        pl.addWidget(self.btn_run)
 
         self.chk_only_neck = QCheckBox("Solo cuello")
         self.chk_only_neck.setToolTip(
@@ -1405,82 +1743,66 @@ class Page2Measurements(QWidget):
             "zonas disponibles)."
         )
         self.chk_only_neck.setStyleSheet(f"""
-            QCheckBox{{font-size:13px;font-weight:600;color:{TEXT_PRI};spacing:8px;}}
-            QCheckBox::indicator{{width:16px;height:16px;border-radius:4px;
+            QCheckBox{{font-size:14px;font-weight:600;color:{TEXT_PRI};spacing:8px;
+                background:transparent;padding:4px 0;}}
+            QCheckBox::indicator{{width:18px;height:18px;border-radius:5px;
                 border:1.5px solid {BORDER_STRONG};background:{BG_PANEL};}}
             QCheckBox::indicator:checked{{background:{TEAL};border-color:{TEAL};}}
             QCheckBox::indicator:hover{{border-color:{TEAL};}}
         """)
         self.chk_only_neck.setChecked(STATE.only_neck_mode)
         self.chk_only_neck.toggled.connect(self._on_only_neck_toggled)
-        ll.addWidget(self.chk_only_neck)
+        pl.addWidget(self.chk_only_neck)
 
-        self.lbl_only_neck_hint = QLabel(
-            "Solo se medirá y comparará la circunferencia del cuello."
-        )
-        self.lbl_only_neck_hint.setStyleSheet(
-            f"font-size:11px;color:{TEXT_HINT};font-style:italic;"
-        )
-        self.lbl_only_neck_hint.setWordWrap(True)
+        self.lbl_only_neck_hint = text_label(
+            "Solo se medirá y comparará la circunferencia del cuello.",
+            13, TEXT_SEC, 400, wrap=True)
         self.lbl_only_neck_hint.setVisible(STATE.only_neck_mode)
-        ll.addWidget(self.lbl_only_neck_hint)
+        pl.addWidget(self.lbl_only_neck_hint)
+        rv.addWidget(proc)
 
-        ll.addWidget(hline())
+        meas, ml = card(spacing=0)
+        mh = QHBoxLayout()
+        mh.addWidget(card_title("Circunferencias", "ruler"))
+        self.lbl_meas_count = text_label(f"0 de {len(ZONES)} calculadas", 13, TEXT_SEC, 500)
+        mh.addWidget(self.lbl_meas_count)
+        ml.addLayout(mh)
+        ml.addSpacing(8)
 
-        ll.addWidget(section_label("Medidas calculadas"))
-        self.meas_grid = QGridLayout(); self.meas_grid.setSpacing(3)
         self._meas_labels = {}
+        self._meas_rows   = {}
         for i, zone in enumerate(ZONES):
-            z_lbl = QLabel(zone.capitalize())
-            z_lbl.setStyleSheet(f"font-size:13px;color:{TEXT_SEC};")
-            v_lbl = QLabel("— cm")
-            v_lbl.setStyleSheet(f"font-size:14px;font-weight:500;color:{TEXT_PRI};")
-            self.meas_grid.addWidget(z_lbl, i, 0)
-            self.meas_grid.addWidget(v_lbl, i, 1)
+            row = QFrame(); row.setObjectName(f"mrow_{zone}")
+            row.setMinimumHeight(44)
+            rl = QHBoxLayout(row); rl.setContentsMargins(10, 0, 10, 0)
+            z_lbl = text_label(zone.capitalize(), 14, TEXT_PRI, 500)
+            v_lbl = text_label("Pendiente", 14, TEXT_HINT, 400)
+            rl.addWidget(z_lbl); rl.addStretch(); rl.addWidget(v_lbl)
+            ml.addWidget(row)
+            if i < len(ZONES) - 1:
+                ml.addWidget(hline())
             self._meas_labels[zone] = v_lbl
-        ll.addLayout(self.meas_grid)
+            self._meas_rows[zone]   = row
+        ml.addSpacing(8)
+        self.lbl_height = text_label("Altura estimada: —", 13, TEXT_SEC, 500)
+        ml.addWidget(self.lbl_height)
+        rv.addWidget(meas)
 
-        self.lbl_height = QLabel("Altura: — cm")
-        self.lbl_height.setStyleSheet(f"font-size:13px;color:{TEXT_SEC};margin-top:4px;")
-        ll.addWidget(self.lbl_height)
+        self.lbl_status = text_label("Esperando datos...", 13, TEXT_SEC, 400, wrap=True)
+        rv.addWidget(self.lbl_status)
+        rv.addStretch()
 
-        ll.addWidget(hline())
-
-        self.btn_run = btn("Ejecutar pipeline", TEAL, TEAL, variant="solid")
-        self.btn_run.clicked.connect(self._run_pipeline)
-        ll.addWidget(self.btn_run)
-
-        self.btn_landmarks_p2 = btn("Detectar landmarks (MediaPipe)", BLUE, BLUE_LIGHT)
-        self.btn_landmarks_p2.clicked.connect(self._detect_landmarks_p2)
-        ll.addWidget(self.btn_landmarks_p2)
-
-        self.lbl_status = QLabel("Esperando datos...")
-        self.lbl_status.setStyleSheet(f"font-size:13px;color:{TEXT_HINT};")
-        self.lbl_status.setWordWrap(True)
-        ll.addWidget(self.lbl_status)
-
-        ll.addStretch()
-
-        nav = QHBoxLayout()
-        self.btn_prev = btn("← Captura", TEXT_SEC, BG_CARD)
-        self.btn_next = btn("Resultados →", PURPLE, PURPLE, variant="solid")
+        nav = QHBoxLayout(); nav.setSpacing(12)
+        self.btn_prev = btn("Volver", icon="arrow-left")
+        self.btn_next = btn("Ver resultados", INK, INK, variant="solid",
+                            icon="arrow-right", icon_right=True)
+        self.btn_prev.setMinimumHeight(52); self.btn_next.setMinimumHeight(52)
         self.btn_prev.clicked.connect(self.go_prev.emit)
         self.btn_next.clicked.connect(self.go_next.emit)
         self.btn_next.setEnabled(False)
-        nav.addWidget(self.btn_prev); nav.addWidget(self.btn_next)
-        ll.addLayout(nav)
-
-        root.addWidget(left)
-
-        self.img_scroll = QScrollArea()
-        self.img_scroll.setWidgetResizable(True)
-        self.img_scroll.setStyleSheet("border:none;background:transparent;")
-        self.img_container = QWidget()
-        self.img_layout    = QVBoxLayout(self.img_container)
-        self.img_layout.setSpacing(8)
-        self.img_layout.setContentsMargins(0,0,0,0)
-        self.img_scroll.setWidget(self.img_container)
-        root.addWidget(self.img_scroll, stretch=1)
+        nav.addWidget(self.btn_prev, stretch=1); nav.addWidget(self.btn_next, stretch=2)
+        rv.addLayout(nav)
+        root.addWidget(right)
 
     def showEvent(self, e):
         super().showEvent(e)
@@ -1489,78 +1811,54 @@ class Page2Measurements(QWidget):
         if not STATE.pipeline_done:
             self.btn_next.setEnabled(False)
 
+    def _on_view_tab(self, idx):
+        names = list(STATE.view_names)
+        if 0 <= idx < len(names):
+            self._set_active_view(names[idx])
+
+    def _set_active_view(self, name):
+        if name not in self._view_images:
+            return
+        self._active_view = name
+        self.seg_views.set_current(list(STATE.view_names).index(name))
+        self._refresh_viewer()
+
+    def _on_slot_changed(self, name):
+        if name == self._active_view:
+            self._refresh_viewer()
+
+    def _refresh_viewer(self):
+        slot = (self._view_images.get(self._active_view) or {}).get("depth")
+        if slot is not None and slot.array is not None:
+            self.viewer.set_image_array(slot.array)
+        else:
+            self.viewer.clear_image(
+                "Sin mapa de profundidad para esta vista.\n"
+                "Vuelve a Captura y carga las imágenes."
+            )
+
     def _on_only_neck_toggled(self, checked: bool):
         STATE.only_neck_mode = checked
         self.lbl_only_neck_hint.setVisible(checked)
 
     def _rebuild_images(self):
-        while self.img_layout.count():
-            item = self.img_layout.takeAt(0)
-            if item.widget(): item.widget().deleteLater()
+        """Vuelve a generar la imagen de cada vista y las pestañas del visor."""
+        names = list(STATE.view_names)
         self._view_images = {}
+        self.seg_views.set_options([VIEW_LABELS.get(n, n) for n in names])
+        self.seg_views.setVisible(len(names) > 1)
 
-        grid_container = QWidget()
-        grid = QGridLayout(grid_container)
-        grid.setSpacing(8)
+        for name in names:
+            # Una sola imagen por vista (profundidad recortada a la ROI). Se
+            # guarda bajo "rgb" y "depth" por compatibilidad con el resto
+            # del código, que escribe en cualquiera de las dos claves.
+            slot = _ViewSlot(lambda n=name: self._on_slot_changed(n))
+            self._view_images[name] = {"rgb": slot, "depth": slot}
+            slot.array = self._render_roi_depth(name)
 
-        # Misma distribución responsiva usada en la página de Captura:
-        # 1 vista = pantalla completa, 2 = arriba/abajo, 3 = 2 arriba + 1 abajo
-        # ocupando todo el ancho, 4 = grid 2x2.
-        n_views_count = len(STATE.view_names)
-        if n_views_count == 1:
-            positions = [(0, 0, 1, 1)]
-            grid_rows, grid_cols = 1, 1
-        elif n_views_count == 2:
-            positions = [(0, 0, 1, 1), (1, 0, 1, 1)]
-            grid_rows, grid_cols = 2, 1
-        elif n_views_count == 3:
-            positions = [(0, 0, 1, 1), (0, 1, 1, 1), (1, 0, 1, 2)]
-            grid_rows, grid_cols = 2, 2
-        else:
-            positions = [(0, 0, 1, 1), (0, 1, 1, 1), (1, 0, 1, 1), (1, 1, 1, 1)]
-            grid_rows, grid_cols = 2, 2
-
-        for r in range(grid_rows):
-            grid.setRowStretch(r, 1)
-        for c in range(grid_cols):
-            grid.setColumnStretch(c, 1)
-
-        for i, name in enumerate(STATE.view_names):
-            row, col, rspan, cspan = positions[i]
-            cell = QWidget()
-            cell.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-            cl   = QVBoxLayout(cell); cl.setContentsMargins(0,0,0,0); cl.setSpacing(4)
-
-            lbl = section_label(name.replace("_"," ").capitalize())
-            cl.addWidget(lbl)
-
-            # Solo panel depth
-            w_dep = ImageWithOverlay()
-            w_dep.setMinimumHeight(320)
-            w_dep.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-
-            dep_lbl = QLabel("Depth")
-            dep_lbl.setStyleSheet(f"font-size:11px;color:{TEXT_HINT};")
-            cl.addWidget(dep_lbl)
-            cl.addWidget(w_dep, stretch=1)
-
-            # Guardar como dict para compatibilidad con el resto del codigo
-            self._view_images[name] = {"rgb": w_dep, "depth": w_dep}
-
-            btn_mark = btn(f"Marcar zonas — {name.replace('_',' ')}", TEAL, TEAL_LIGHT)
-            btn_mark.setFixedHeight(26)
-            def _make_cb(vname):
-                return lambda: self._open_zone_marker(vname)
-            btn_mark.clicked.connect(_make_cb(name))
-            cl.addWidget(btn_mark)
-
-            grid.addWidget(cell, row, col, rspan, cspan)
-
-            img = self._render_roi_depth(name)
-            if img is not None:
-                w_dep.set_image_array(img)
-
-        self.img_layout.addWidget(grid_container, stretch=1)
+        if self._active_view not in names:
+            self._active_view = names[0]
+        self._set_active_view(self._active_view)
 
     def _roi_bounds(self, name):
         """(x1,y1,x2,y2) del ROI de esta vista, ordenados y recortados a
@@ -1620,20 +1918,36 @@ class Page2Measurements(QWidget):
     # ── MODIFICACIÓN 3 ─────────────────────────────────────────────────────────
     def _update_measurements_display(self):
         """
-        Actualiza la tabla de medidas del panel izquierdo.
+        Actualiza la lista de circunferencias del panel derecho.
 
         STATE.measurements ahora es {zona: {"y_px", "circumference_cm", ...}}
         Se mantiene compatibilidad con el formato viejo {zona: float}.
         """
+        done = 0
         for zone, lbl in self._meas_labels.items():
             data = STATE.measurements.get(zone)
             if isinstance(data, dict):
                 val = data.get("circumference_cm")
             else:
                 val = data          # compatibilidad con formato anterior
-            lbl.setText(f"{val:.1f} cm" if val else "— cm")
+            if val:
+                done += 1
+                lbl.setText(f"{val:.1f} cm")
+                lbl.setStyleSheet(
+                    f"font-family:{FONT_MONO};font-size:16px;font-weight:600;"
+                    f"color:{TEXT_PRI};background:transparent;border:none;"
+                )
+            else:
+                lbl.setText("Pendiente")
+                lbl.setStyleSheet(
+                    f"font-size:14px;font-weight:400;color:{TEXT_HINT};"
+                    f"background:transparent;border:none;"
+                )
+        self.lbl_meas_count.setText(f"{done} de {len(self._meas_labels)} calculadas")
         if STATE.height_cm > 0:
             self.lbl_height.setText(f"Altura estimada: {STATE.height_cm:.1f} cm")
+        else:
+            self.lbl_height.setText("Altura estimada: —")
 
     # ── MODIFICACIÓN 4 ─────────────────────────────────────────────────────────
     def _draw_measurement_rects(self):
@@ -1940,112 +2254,177 @@ class Page3Results(QWidget):
 
     def _build(self):
         root = QHBoxLayout(self)
-        root.setContentsMargins(12,12,12,12)
-        root.setSpacing(10)
+        root.setContentsMargins(24, 20, 24, 20)
+        root.setSpacing(20)
 
-        left = QWidget(); left.setFixedWidth(290)
-        left.setStyleSheet(card_panel())
-
-        elevate(left, blur=20, y_offset=2, alpha=10)
-        ll = QVBoxLayout(left)
-        ll.setContentsMargins(12,12,12,12); ll.setSpacing(6)
-
-        ll.addWidget(section_label("Volumen por zona"))
-        self._zone_cards = {}
-        for zone in ["cuello","pecho","cintura","cadera","muslo","rodilla"]:
-            card = QWidget()
-            card.setStyleSheet(
-                f"background:{BG_CARD};border:1px solid {BORDER};border-radius:{RADIUS_SM}px;"
-            )
-            cl = QVBoxLayout(card); cl.setContentsMargins(10,8,10,8); cl.setSpacing(4)
-            lz = QLabel(zone.capitalize())
-            lz.setStyleSheet(f"font-size:12px;color:{TEXT_SEC};font-weight:600;")
-            lv = QLabel("—")
-            lv.setStyleSheet(f"font-size:16px;font-weight:700;color:{TEXT_PRI};")
-            bar = QProgressBar(); bar.setRange(0,100); bar.setValue(50)
-            bar.setTextVisible(False); bar.setFixedHeight(5)
-            bar.setStyleSheet(f"""
-                QProgressBar{{background:{BORDER};border-radius:2px;border:none;}}
-                QProgressBar::chunk{{background:{TEAL};border-radius:2px;}}
-            """)
-            cl.addWidget(lz); cl.addWidget(lv); cl.addWidget(bar)
-            self._zone_cards[zone] = {"val": lv, "bar": bar}
-            ll.addWidget(card)
-
-        ll.addWidget(hline())
-
-        self.btn_run_smpl = btn("Comparar con Malla de Referencia", TEAL, TEAL, variant="solid")
-        self.btn_run_smpl.clicked.connect(self._run_smpl)
-        ll.addWidget(self.btn_run_smpl)
-
-        self.btn_pdf = btn("Exportar PDF clínico", CORAL, CORAL_LIGHT)
-        self.btn_pdf.clicked.connect(self._export_pdf)
-        ll.addWidget(self.btn_pdf)
-
-        self.lbl_status = QLabel("")
-        self.lbl_status.setStyleSheet(f"font-size:13px;color:{TEXT_HINT};")
-        self.lbl_status.setWordWrap(True)
-        ll.addWidget(self.lbl_status)
-
-        ll.addStretch()
-
-        self.btn_prev = btn("← Mediciones", TEXT_SEC, BG_CARD)
-        self.btn_prev.clicked.connect(self.go_prev.emit)
-        ll.addWidget(self.btn_prev)
-
-        root.addWidget(left)
-
+        # ── Centro: comparación de mallas + tabla ───────────────────────────
         center = QWidget()
-        cl = QVBoxLayout(center); cl.setSpacing(8)
+        cv = QVBoxLayout(center)
+        cv.setContentsMargins(0, 0, 0, 0); cv.setSpacing(14)
 
-        cl.addWidget(section_label("Comparación — malla actual vs. referencia"))
+        head = QHBoxLayout()
+        head.addWidget(text_label("Malla real frente a referencia", 24, TEXT_PRI, 700))
+        head.addStretch()
+        cv.addLayout(head)
 
+        viewer_card, vl = card(margins=(12, 12, 12, 12), spacing=0)
         self.img_comparison = QLabel(
-            "Presiona 'Comparar con Malla de Referencia' para generar y "
-            "comparar las mallas 3D"
+            "Presiona «Comparar con malla de referencia» para generar\n"
+            "y comparar las mallas 3D"
         )
         self.img_comparison.setAlignment(Qt.AlignCenter)
         self.img_comparison.setStyleSheet(
             f"background:{BG_CARD};border:1.5px dashed {BORDER_STRONG};"
-            f"border-radius:{RADIUS}px;color:{TEXT_HINT};font-size:14px;"
+            f"border-radius:{RADIUS_SM}px;color:{TEXT_SEC};font-size:15px;"
         )
-        self.img_comparison.setMinimumHeight(300)
-        cl.addWidget(self.img_comparison, stretch=2)
+        self.img_comparison.setMinimumHeight(280)
+        vl.addWidget(self.img_comparison)
+        cv.addWidget(viewer_card, stretch=3)
 
-        cl.addWidget(hline())
-        cl.addWidget(section_label("Tabla completa de medidas"))
-
+        table_card, tcl = card(margins=(20, 16, 20, 16), spacing=10)
+        tcl.addWidget(card_title("Tabla de medidas", "ruler"))
         self.table_widget = QWidget()
-        tl = QGridLayout(self.table_widget); tl.setSpacing(4)
+        self.table_widget.setStyleSheet("background:transparent;")
+        tl = QGridLayout(self.table_widget)
+        tl.setContentsMargins(0, 0, 0, 0); tl.setSpacing(0)
         headers = ["Zona", "Valor actual", "Valor referencia", "Diferencia"]
         for ci, h in enumerate(headers):
             hl = QLabel(h)
+            align = "left" if ci == 0 else "right"
+            hl.setAlignment((Qt.AlignLeft if ci == 0 else Qt.AlignRight) | Qt.AlignVCenter)
             hl.setStyleSheet(
-                f"background:{TEXT_PRI};color:{TEXT_ON_DARK};padding:7px 10px;"
-                f"font-size:12px;font-weight:700;letter-spacing:0.3px;"
+                f"background:transparent;color:{TEXT_SEC};padding:8px 10px;"
+                f"font-size:13px;font-weight:600;border:none;"
+                f"border-bottom:1px solid {BORDER_STRONG};"
             )
             tl.addWidget(hl, 0, ci)
 
         self._table_rows = {}
         for ri, zone in enumerate(ZONES, 1):
-            bg = BG_CARD if ri % 2 == 0 else BG_PANEL
             row_widgets = []
             for ci in range(4):
                 lbl = QLabel("—")
+                lbl.setAlignment((Qt.AlignLeft if ci == 0 else Qt.AlignRight) | Qt.AlignVCenter)
+                fam = "" if ci == 0 else f"font-family:{FONT_MONO};"
                 lbl.setStyleSheet(
-                    f"background:{bg};padding:7px 10px;font-size:13px;color:{TEXT_PRI};"
-                    f"border-bottom:1px solid {BORDER};"
+                    f"background:transparent;padding:7px 10px;font-size:14px;{fam}"
+                    f"color:{TEXT_PRI};border:none;border-bottom:1px solid {BORDER};"
                 )
                 tl.addWidget(lbl, ri, ci)
                 row_widgets.append(lbl)
             self._table_rows[zone] = row_widgets
-
-        cl.addWidget(self.table_widget)
+        tcl.addWidget(self.table_widget)
+        cv.addWidget(table_card)
         root.addWidget(center, stretch=1)
+
+        # ── Columna derecha: resumen por zona y acciones ────────────────────
+        right = QWidget(); right.setFixedWidth(380)
+        rv = QVBoxLayout(right)
+        rv.setContentsMargins(0, 0, 0, 0); rv.setSpacing(14)
+
+        top, tpl = card(spacing=6)
+        tpl.addWidget(text_label("Mayor diferencia de volumen", 13, TEXT_SEC, 500))
+        top_row = QHBoxLayout()
+        self.lbl_top_zone = text_label("—", 22, TEXT_PRI, 700)
+        self.lbl_top_val  = text_label("—", 30, TEXT_PRI, 600, mono=True)
+        top_row.addWidget(self.lbl_top_zone); top_row.addStretch()
+        top_row.addWidget(self.lbl_top_val)
+        tpl.addLayout(top_row)
+        self.lbl_top_sub = text_label(
+            "Aún sin comparación con la malla de referencia.", 13, TEXT_SEC, 400, wrap=True)
+        tpl.addWidget(self.lbl_top_sub)
+        rv.addWidget(top)
+
+        zones_card, zl = card(spacing=12)
+        zl.addWidget(card_title("Volumen por zona", "layers"))
+        self._zone_cards = {}
+        for zone in ["cuello","pecho","cintura","cadera","muslo","rodilla"]:
+            cell = QWidget(); cell.setStyleSheet("background:transparent;")
+            cl = QVBoxLayout(cell); cl.setContentsMargins(0,0,0,0); cl.setSpacing(5)
+            line = QHBoxLayout()
+            line.addWidget(text_label(zone.capitalize(), 14, TEXT_PRI, 500))
+            line.addStretch()
+            lv = text_label("—", 14, TEXT_HINT, 600, mono=True)
+            line.addWidget(lv)
+            bar = thin_bar(TEAL)
+            cl.addLayout(line); cl.addWidget(bar)
+            self._zone_cards[zone] = {"val": lv, "bar": bar}
+            zl.addWidget(cell)
+        zl.addWidget(text_label(
+            "Naranja: la malla real supera a la referencia. Azul: queda por debajo. "
+            "La barra indica el porcentaje de la zona en exceso.",
+            12, TEXT_SEC, 400, wrap=True))
+        rv.addWidget(zones_card)
+
+        self.btn_run_smpl = btn("Comparar con malla de referencia", TEAL, TEAL,
+                                variant="solid", icon="layers")
+        self.btn_run_smpl.setMinimumHeight(52)
+        self.btn_run_smpl.clicked.connect(self._run_smpl)
+        rv.addWidget(self.btn_run_smpl)
+
+        self.lbl_status = text_label("", 13, TEXT_SEC, 400, wrap=True)
+        rv.addWidget(self.lbl_status)
+        rv.addStretch()
+
+        nav = QHBoxLayout(); nav.setSpacing(12)
+        self.btn_prev = btn("Volver", icon="arrow-left")
+        self.btn_prev.clicked.connect(self.go_prev.emit)
+        self.btn_pdf = btn("Exportar PDF clínico", TEAL, BG_PANEL, icon="download")
+        self.btn_pdf.clicked.connect(self._export_pdf)
+        self.btn_prev.setMinimumHeight(52); self.btn_pdf.setMinimumHeight(52)
+        nav.addWidget(self.btn_prev, stretch=1); nav.addWidget(self.btn_pdf, stretch=2)
+        rv.addLayout(nav)
+        root.addWidget(right)
 
     def showEvent(self, e):
         super().showEvent(e)
         self._update_table()
+
+    def _set_zone_card(self, zone, diff_cm3, pct):
+        """Pinta una fila de 'Volumen por zona': valor con signo y barra de color."""
+        card_w = self._zone_cards.get(zone)
+        if card_w is None:
+            return
+        if diff_cm3 is None:
+            card_w["val"].setText("—")
+            card_w["val"].setStyleSheet(
+                f"font-family:{FONT_MONO};font-size:14px;font-weight:600;"
+                f"color:{TEXT_HINT};background:transparent;border:none;")
+            card_w["bar"].setValue(0)
+            return
+        color = CORAL if diff_cm3 >= 0 else BLUE
+        sign  = "+" if diff_cm3 >= 0 else "−"
+        card_w["val"].setText(f"{sign}{abs(diff_cm3):.0f} cm³")
+        card_w["val"].setStyleSheet(
+            f"font-family:{FONT_MONO};font-size:14px;font-weight:600;"
+            f"color:{color};background:transparent;border:none;")
+        set_bar_color(card_w["bar"], color)
+        card_w["bar"].setValue(max(0, min(100, int(pct))))
+
+    def _set_top_card(self, diffs):
+        """diffs: {zona: diferencia de volumen en cm³}. Destaca la mayor en valor absoluto."""
+        if not diffs:
+            self.lbl_top_zone.setText("—")
+            self.lbl_top_val.setText("—")
+            self.lbl_top_sub.setText("Aún sin comparación con la malla de referencia.")
+            return
+        zone = max(diffs, key=lambda z: abs(diffs[z]))
+        d    = diffs[zone]
+        color = CORAL if d >= 0 else BLUE
+        sign  = "+" if d >= 0 else "−"
+        self.lbl_top_zone.setText(zone.capitalize())
+        self.lbl_top_val.setText(f"{sign}{abs(d):.0f} cm³")
+        self.lbl_top_val.setStyleSheet(
+            f"font-family:{FONT_MONO};font-size:30px;font-weight:600;"
+            f"color:{color};background:transparent;border:none;")
+        meas = STATE.measurements.get(zone)
+        circ = meas.get("circumference_cm") if isinstance(meas, dict) else meas
+        if circ:
+            self.lbl_top_sub.setText(f"Perímetro medido: {circ:.1f} cm")
+        else:
+            self.lbl_top_sub.setText(
+                "La malla real supera a la referencia." if d >= 0
+                else "La malla real queda por debajo de la referencia.")
 
     def _update_table(self):
         """
@@ -2307,26 +2686,24 @@ class Page3Results(QWidget):
             }
             zone_volumes = STATE.smpl_result.get("zone_volumes", {})
             zone_stats   = STATE.smpl_result.get("zone_stats", {})
+            top_diffs = {}
             for zone, card in self._zone_cards.items():
                 # En modo "Solo cuello" las otras zonas no participaron
                 # en la comparación (quedaron en el promedio poblacional
                 # del reshaper) — mostrar un número ahí sugeriría una
                 # diferencia medida que en realidad no se calculó.
                 if STATE.only_neck_mode and zone != "cuello":
-                    card["val"].setText("—")
-                    card["bar"].setValue(0)
+                    self._set_zone_card(zone, None, 0)
                     continue
                 band = CARD_TO_BAND.get(zone)
                 vol  = zone_volumes.get(band, {}) if band else {}
                 st   = zone_stats.get(band, {}) if band else {}
                 diff_cm3 = vol.get("vol_diff_cm3")
                 pct      = st.get("pct_excess", 50)
+                self._set_zone_card(zone, diff_cm3, pct)
                 if diff_cm3 is not None:
-                    sign = "+" if diff_cm3 >= 0 else ""
-                    card["val"].setText(f"{sign}{diff_cm3:.0f} cm³")
-                else:
-                    card["val"].setText("—")
-                card["bar"].setValue(int(pct))
+                    top_diffs[zone] = diff_cm3
+            self._set_top_card(top_diffs)
 
         # La columna "Valor referencia" de la tabla depende de
         # STATE.smpl_result (recién poblado) — refrescar ahora que ya
@@ -2401,9 +2778,12 @@ class Page3Results(QWidget):
 # ══════════════════════════════════════════════════════════════════════════════
 class MainWindow(QMainWindow):
 
+    STEPS = ["Captura", "Mediciones", "Resultados"]
+
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Body3D Reconstruction")
+        self.setWindowTitle(APP_NAME)
+        self.setWindowIcon(app_icon())
         self.setMinimumSize(1280, 800)
         self._build()
         self._apply_styles()
@@ -2415,46 +2795,51 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(0,0,0,0)
         root.setSpacing(0)
 
-        nav_bar = QWidget()
-        nav_bar.setFixedHeight(60)
-        nav_bar.setStyleSheet(f"background:{BG_PANEL};border-bottom:1px solid {BORDER};")
-        elevate(nav_bar, blur=16, y_offset=2, alpha=14)
+        # ── Cabecera de marca con los tres pasos ────────────────────────────
+        nav_bar = QFrame()
+        nav_bar.setObjectName("navbar")
+        nav_bar.setFixedHeight(66)
+        nav_bar.setStyleSheet(f"#navbar{{background:{TEAL};border:none;}}")
         nb = QHBoxLayout(nav_bar)
-        nb.setContentsMargins(24,0,24,0); nb.setSpacing(0)
+        nb.setContentsMargins(24,0,24,0); nb.setSpacing(10)
 
-        logo = QLabel("◆")
-        logo.setStyleSheet(f"font-size:18px;color:{TEAL};margin-right:10px;")
+        logo = QLabel()
+        logo.setPixmap(app_icon_pixmap(40))
+        logo.setFixedSize(40, 40)
+        logo.setStyleSheet("background:transparent;border:none;")
         nb.addWidget(logo)
 
-        title = QLabel("Body3D Reconstruction")
+        title = QLabel(APP_NAME)
         title.setStyleSheet(
-            f"font-size:16px;font-weight:700;color:{TEXT_PRI};margin-right:40px;"
+            f"font-size:19px;font-weight:700;color:{TEXT_ON_DARK};"
+            f"background:transparent;border:none;margin-right:22px;"
         )
         nb.addWidget(title)
 
         self._tab_btns = []
-        for i, (label, color) in enumerate([
-            ("1 · Captura", TEAL),
-            ("2 · Mediciones", PURPLE),
-            ("3 · Resultados", CORAL),
-        ]):
-            tb = QPushButton(label)
+        for i, label in enumerate(self.STEPS):
+            tb = QPushButton()
             tb.setCheckable(True)
-            tb.setFixedHeight(60)
+            tb.setFixedHeight(40)
             tb.setCursor(Qt.PointingHandCursor)
+            tb.setIconSize(icon_size(16))
             tb.setStyleSheet(f"""
-                QPushButton{{background:transparent;color:{TEXT_SEC};
-                    border:none;border-bottom:3px solid transparent;
-                    padding:0 20px;font-size:14px;font-weight:500;}}
-                QPushButton:checked{{color:{color};
-                    border-bottom:3px solid {color};font-weight:700;}}
-                QPushButton:hover:!checked{{color:{TEXT_PRI};background:{BG_MAIN};}}
+                QPushButton{{background:{TEAL_MID};color:{TEXT_ON_DARK};
+                    border:none;border-radius:20px;
+                    padding:0 18px;font-size:14px;font-weight:600;}}
+                QPushButton:checked{{background:{BG_PANEL};color:{TEAL};font-weight:700;}}
+                QPushButton:hover:!checked{{background:#1E7868;}}
             """)
             tb.clicked.connect(lambda _, idx=i: self._go_to(idx))
             nb.addWidget(tb)
             self._tab_btns.append(tb)
 
         nb.addStretch()
+        self.lbl_patient = QLabel("")
+        self.lbl_patient.setStyleSheet(
+            "font-size:14px;color:#D3ECE5;background:transparent;border:none;"
+        )
+        nb.addWidget(self.lbl_patient)
         root.addWidget(nav_bar)
 
         self.stack = QStackedWidget()
@@ -2477,31 +2862,51 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentIndex(idx)
         for i, tb in enumerate(self._tab_btns):
             tb.setChecked(i == idx)
+            if i < idx:
+                # Paso ya completado: marca de verificación en vez del número
+                tb.setIcon(line_icon("check", MINT, 16, 3.0))
+                tb.setText(self.STEPS[i])
+            else:
+                tb.setIcon(QIcon())
+                tb.setText(f"{i + 1}   {self.STEPS[i]}")
+        self._update_patient_label()
+
+    def _update_patient_label(self):
+        p = STATE.patient
+        name = (p.get("name") or "").strip()
+        if not name or name == "No especificado":
+            name = "sin nombre"
+        sex = "F" if p.get("sex") == "female" else "M"
+        try:
+            age = f"{int(float(p.get('age', 0)))} años"
+        except (TypeError, ValueError):
+            age = "—"
+        self.lbl_patient.setText(f"Paciente: {name}  ·  {sex}  ·  {age}")
 
     def _apply_styles(self):
         self.setStyleSheet(f"""
             * {{ font-family: {FONT_FAMILY}; }}
             QMainWindow, QDialog {{ background:{BG_MAIN}; }}
 
-            QSlider::groove:horizontal{{height:5px;background:{BORDER};border-radius:2px;}}
-            QSlider::handle:horizontal{{width:16px;height:16px;margin:-6px 0;
-                border-radius:8px;background:{TEAL};border:2px solid {BG_PANEL};}}
+            QSlider::groove:horizontal{{height:6px;background:#E6EBEE;border-radius:3px;}}
+            QSlider::handle:horizontal{{width:18px;height:18px;margin:-7px 0;
+                border-radius:9px;background:{TEAL};border:2px solid {BG_PANEL};}}
             QSlider::handle:horizontal:hover{{background:{TEAL_DARK};}}
-            QSlider::sub-page:horizontal{{background:{TEAL};border-radius:2px;}}
+            QSlider::sub-page:horizontal{{background:{TEAL};border-radius:3px;}}
 
-            QComboBox{{background:{BG_CARD};border:1px solid {BORDER};
-                border-radius:{RADIUS_SM}px;padding:5px 10px;font-size:14px;color:{TEXT_PRI};}}
-            QComboBox:hover{{border-color:{BORDER_STRONG};}}
-            QComboBox:focus{{border-color:{TEAL};background:{BG_PANEL};}}
+            QComboBox{{background:{BG_PANEL};border:1px solid {BORDER_STRONG};
+                border-radius:{RADIUS_SM}px;padding:8px 10px;font-size:14px;color:{TEXT_PRI};}}
+            QComboBox:hover{{border-color:{TEXT_HINT};}}
+            QComboBox:focus{{border-color:{TEAL};}}
             QComboBox::drop-down{{border:none;width:24px;}}
             QComboBox QAbstractItemView{{background:{BG_PANEL};border:1px solid {BORDER};
                 border-radius:{RADIUS_SM}px;selection-background-color:{TEAL_LIGHT};
                 selection-color:{TEAL_DARK};padding:4px;outline:none;}}
 
-            QLineEdit, QSpinBox{{background:{BG_CARD};border:1px solid {BORDER};
-                border-radius:{RADIUS_SM}px;padding:5px 10px;font-size:14px;color:{TEXT_PRI};}}
-            QLineEdit:hover, QSpinBox:hover{{border-color:{BORDER_STRONG};}}
-            QLineEdit:focus, QSpinBox:focus{{border-color:{TEAL};background:{BG_PANEL};}}
+            QLineEdit, QSpinBox{{background:{BG_PANEL};border:1px solid {BORDER_STRONG};
+                border-radius:{RADIUS_SM}px;padding:8px 10px;font-size:14px;color:{TEXT_PRI};}}
+            QLineEdit:hover, QSpinBox:hover{{border-color:{TEXT_HINT};}}
+            QLineEdit:focus, QSpinBox:focus{{border-color:{TEAL};}}
 
             QScrollArea{{border:none;background:transparent;}}
             QGroupBox{{font-size:14px;}}
@@ -2520,9 +2925,9 @@ class MainWindow(QMainWindow):
             QMessageBox{{background:{BG_PANEL};}}
             QMessageBox QLabel{{color:{TEXT_PRI};font-size:14px;}}
             QMessageBox QPushButton{{background:{TEAL};color:{TEXT_ON_DARK};border:none;
-                border-radius:{RADIUS_SM}px;padding:7px 16px;font-size:13px;font-weight:600;min-width:72px;}}
+                border-radius:{RADIUS_SM}px;padding:8px 18px;font-size:14px;font-weight:600;min-width:72px;}}
             QMessageBox QPushButton:hover{{background:{TEAL_DARK};}}
 
-            QInputDialog QLineEdit{{background:{BG_CARD};border:1px solid {BORDER};
-                border-radius:{RADIUS_SM}px;padding:6px 10px;}}
+            QInputDialog QLineEdit{{background:{BG_PANEL};border:1px solid {BORDER_STRONG};
+                border-radius:{RADIUS_SM}px;padding:8px 10px;}}
         """)
