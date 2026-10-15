@@ -26,17 +26,18 @@ from PyQt5.QtWidgets import QGraphicsDropShadowEffect
 from src.gui.branding import (
     APP_NAME, app_icon, app_icon_pixmap, line_icon, icon_size
 )
+from src.gui.mesh_viewer import MeshViewer, ZONE_BANDS
 
 # ── Paleta ─────────────────────────────────────────────────────────────────────
 # Identidad SomaRecon 3D: verde petróleo de marca, superficies frías y neutras,
-# naranja para "mayor que la referencia" y azul para "menor que la referencia".
+# rojo para "mayor que la referencia" y azul para "menor que la referencia".
 TEAL          = "#0B4F43"   # color de marca / acciones principales
 TEAL_LIGHT    = "#D9ECE7"
 TEAL_DARK     = "#083F35"
 TEAL_MID      = "#17685A"   # pasos inactivos sobre la cabecera
 MINT          = "#8FE3CD"   # acento claro sobre fondos oscuros
-CORAL         = "#C2540F"   # exceso / detener / advertencia
-CORAL_LIGHT   = "#FBEBDD"
+CORAL         = "#C62828"   # exceso (rojo) / detener / advertencia
+CORAL_LIGHT   = "#FBE9E7"
 PURPLE        = "#14232A"   # navegación hacia adelante (tinta)
 PURPLE_LIGHT  = "#E6EBEE"
 BLUE          = "#1F5F9E"   # déficit / acciones de IA (landmarks)
@@ -2248,6 +2249,9 @@ class Page3Results(QWidget):
 
     go_prev = pyqtSignal()
 
+    _EMPTY_MSG = ("Presiona «Comparar con malla de referencia» para generar\n"
+                  "la malla 3D y compararla con la referencia.")
+
     def __init__(self):
         super().__init__()
         self._build()
@@ -2257,65 +2261,43 @@ class Page3Results(QWidget):
         root.setContentsMargins(24, 20, 24, 20)
         root.setSpacing(20)
 
-        # ── Centro: comparación de mallas + tabla ───────────────────────────
+        # ── Centro: una sola malla 3D giratoria ─────────────────────────────
         center = QWidget()
         cv = QVBoxLayout(center)
         cv.setContentsMargins(0, 0, 0, 0); cv.setSpacing(14)
 
-        head = QHBoxLayout()
+        head = QHBoxLayout(); head.setSpacing(10)
         head.addWidget(text_label("Malla real frente a referencia", 24, TEXT_PRI, 700))
         head.addStretch()
+        self.seg_view = Segmented(["Frontal", "Lateral", "Posterior"])
+        self.seg_view.changed.connect(self._on_view_preset)
+        head.addWidget(self.seg_view)
+        self.btn_spin = QPushButton("Girar")
+        self.btn_spin.setCheckable(True)
+        self.btn_spin.setCursor(Qt.PointingHandCursor)
+        self.btn_spin.setMinimumHeight(46)
+        self.btn_spin.setStyleSheet(f"""
+            QPushButton{{background:#DBE2E5;color:{TEXT_SEC};border:none;
+                border-radius:10px;padding:6px 18px;font-size:14px;font-weight:600;}}
+            QPushButton:hover:!checked{{background:#CFD8DC;}}
+            QPushButton:checked{{background:{TEAL};color:{TEXT_ON_DARK};}}
+        """)
+        self.btn_spin.toggled.connect(self._on_spin_toggled)
+        head.addWidget(self.btn_spin)
         cv.addLayout(head)
 
-        viewer_card, vl = card(margins=(12, 12, 12, 12), spacing=0)
-        self.img_comparison = QLabel(
-            "Presiona «Comparar con malla de referencia» para generar\n"
-            "y comparar las mallas 3D"
+        self.mesh_view = MeshViewer(
+            FONT_FAMILY.split(",")[0].strip(' "'),
+            FONT_MONO.split(",")[0].strip(' "'),
         )
-        self.img_comparison.setAlignment(Qt.AlignCenter)
-        self.img_comparison.setStyleSheet(
-            f"background:{BG_CARD};border:1.5px dashed {BORDER_STRONG};"
-            f"border-radius:{RADIUS_SM}px;color:{TEXT_SEC};font-size:15px;"
-        )
-        self.img_comparison.setMinimumHeight(280)
-        vl.addWidget(self.img_comparison)
-        cv.addWidget(viewer_card, stretch=3)
-
-        table_card, tcl = card(margins=(20, 16, 20, 16), spacing=10)
-        tcl.addWidget(card_title("Tabla de medidas", "ruler"))
-        self.table_widget = QWidget()
-        self.table_widget.setStyleSheet("background:transparent;")
-        tl = QGridLayout(self.table_widget)
-        tl.setContentsMargins(0, 0, 0, 0); tl.setSpacing(0)
-        headers = ["Zona", "Valor actual", "Valor referencia", "Diferencia"]
-        for ci, h in enumerate(headers):
-            hl = QLabel(h)
-            align = "left" if ci == 0 else "right"
-            hl.setAlignment((Qt.AlignLeft if ci == 0 else Qt.AlignRight) | Qt.AlignVCenter)
-            hl.setStyleSheet(
-                f"background:transparent;color:{TEXT_SEC};padding:8px 10px;"
-                f"font-size:13px;font-weight:600;border:none;"
-                f"border-bottom:1px solid {BORDER_STRONG};"
-            )
-            tl.addWidget(hl, 0, ci)
-
-        self._table_rows = {}
-        for ri, zone in enumerate(ZONES, 1):
-            row_widgets = []
-            for ci in range(4):
-                lbl = QLabel("—")
-                lbl.setAlignment((Qt.AlignLeft if ci == 0 else Qt.AlignRight) | Qt.AlignVCenter)
-                fam = "" if ci == 0 else f"font-family:{FONT_MONO};"
-                lbl.setStyleSheet(
-                    f"background:transparent;padding:7px 10px;font-size:14px;{fam}"
-                    f"color:{TEXT_PRI};border:none;border-bottom:1px solid {BORDER};"
-                )
-                tl.addWidget(lbl, ri, ci)
-                row_widgets.append(lbl)
-            self._table_rows[zone] = row_widgets
-        tcl.addWidget(self.table_widget)
-        cv.addWidget(table_card)
+        self.mesh_view.set_message(self._EMPTY_MSG)
+        cv.addWidget(self.mesh_view, stretch=1)
         root.addWidget(center, stretch=1)
+
+        # La tabla de medidas se quitó de esta pantalla (las medidas ya se
+        # muestran en Mediciones). Se conserva el diccionario vacío para que
+        # _update_table siga siendo válido sin filas que rellenar.
+        self._table_rows = {}
 
         # ── Columna derecha: resumen por zona y acciones ────────────────────
         right = QWidget(); right.setFixedWidth(380)
@@ -2351,7 +2333,7 @@ class Page3Results(QWidget):
             self._zone_cards[zone] = {"val": lv, "bar": bar}
             zl.addWidget(cell)
         zl.addWidget(text_label(
-            "Naranja: la malla real supera a la referencia. Azul: queda por debajo. "
+            "Rojo: la malla real supera a la referencia. Azul: queda por debajo. "
             "La barra indica el porcentaje de la zona en exceso.",
             12, TEXT_SEC, 400, wrap=True))
         rv.addWidget(zones_card)
@@ -2379,6 +2361,41 @@ class Page3Results(QWidget):
     def showEvent(self, e):
         super().showEvent(e)
         self._update_table()
+        self._show_mesh()
+
+    def _on_view_preset(self, idx):
+        """Botones Frontal / Lateral / Posterior del visor 3D."""
+        self.btn_spin.setChecked(False)
+        self.mesh_view.set_yaw([0.0, 90.0, 180.0][idx])
+
+    def _on_spin_toggled(self, on):
+        self.mesh_view.set_spinning(on)
+        if not on:
+            # volver a pintar con calidad completa al detener el giro
+            self.mesh_view._fast = False
+            self.mesh_view._cache = None
+            self.mesh_view.update()
+
+    def _show_mesh(self):
+        """Carga en el visor la malla real coloreada con la última comparación."""
+        res = STATE.smpl_result or {}
+        verts = res.get("verts_real")
+        faces = res.get("faces")
+        dists = res.get("signed_dists")
+        if verts is None or faces is None or dists is None:
+            self.btn_spin.setChecked(False)
+            self.mesh_view.clear()
+            self.mesh_view.set_message(self._EMPTY_MSG)
+            return
+        zone_stats = res.get("zone_stats", {})
+        zone_values = {}
+        for band in ZONE_BANDS:
+            if STATE.only_neck_mode and band != "cuello":
+                continue      # en modo "solo cuello" las demás no se compararon
+            st = zone_stats.get(band)
+            if st and st.get("mean_cm") is not None:
+                zone_values[band] = float(st["mean_cm"])
+        self.mesh_view.set_mesh(verts, faces, dists, zone_values)
 
     def _set_zone_card(self, zone, diff_cm3, pct):
         """Pinta una fila de 'Volumen por zona': valor con signo y barra de color."""
@@ -2642,6 +2659,13 @@ class Page3Results(QWidget):
                         "synth_meas":   synth_meas,
                         "ideal_weight": ideal_weight,
                         "method":       method_label,
+                        # Datos para el visor 3D giratorio de Resultados
+                        "verts_real":   np.asarray(verts_real, dtype=np.float32),
+                        "faces":        np.asarray(faces, dtype=np.int64),
+                        "signed_dists": np.asarray(signed_dists, dtype=np.float32),
+                        # Malla de referencia, para el perfil de contorno y la
+                        # silueta superpuesta del reporte PDF
+                        "verts_synth":  np.asarray(verts_synth, dtype=np.float32),
                     }
                     self.done.emit("output/volume_comparison.png")
                 except Exception:
@@ -2663,13 +2687,11 @@ class Page3Results(QWidget):
             f"Completado ✓  |  Peso ideal IMC22: {ideal_w} kg  |  "
             f"Medidas: {zonas}  |  {method}"
         )
-        if Path(img_path).exists():
-            pix = QPixmap(img_path).scaled(
-                self.img_comparison.width(),
-                self.img_comparison.height(),
-                Qt.KeepAspectRatio, Qt.SmoothTransformation
-            )
-            self.img_comparison.setPixmap(pix)
+        # La imagen de 4 vistas (img_path) se sigue generando porque la usa
+        # el PDF; en pantalla se muestra una sola malla giratoria.
+        self.seg_view.set_current(0)
+        self.mesh_view.set_yaw(0.0)
+        self._show_mesh()
         if STATE.smpl_result:
             # Las tarjetas de la izquierda usan los nombres de ZONES
             # (cuello/pecho/brazo/cintura/cadera/muslo/rodilla), pero
@@ -2750,9 +2772,23 @@ class Page3Results(QWidget):
                 else:
                     meas_flat[z] = d
 
+            res = STATE.smpl_result or {}
+
+            # Vistas de la malla coloreada (las mismas del visor 3D) para el PDF
+            mesh_views = []
+            if self.mesh_view.has_mesh():
+                out_dir = Path("output"); out_dir.mkdir(exist_ok=True)
+                for title, yaw in (("Frontal", 0.0), ("Lateral", 90.0),
+                                   ("Posterior", 180.0)):
+                    pm = self.mesh_view.snapshot(yaw, max_height=900)
+                    if pm is None:
+                        continue
+                    path = out_dir / f"pdf_malla_{title.lower()}.png"
+                    if pm.save(str(path), "PNG"):
+                        mesh_views.append((title, str(path)))
+
             generate_pdf(
-                img_path    = (STATE.smpl_result or {}).get(
-                                  "img_path","output/volume_comparison.png"),
+                img_path    = res.get("img_path", "output/volume_comparison.png"),
                 zone_cards  = zone_cards_simple,
                 output_path = save_path,
                 patient_data= {
@@ -2763,8 +2799,23 @@ class Page3Results(QWidget):
                     "height":   p["height"],
                     "body_fat": p["body_fat"],
                 },
-                meas_real  = meas_flat,
-                synth_meas = (STATE.smpl_result or {}).get("synth_meas"),
+                meas_real    = meas_flat,
+                synth_meas   = res.get("synth_meas"),
+                zone_stats   = res.get("zone_stats"),
+                zone_volumes = res.get("zone_volumes"),
+                mesh_views   = mesh_views,
+                scale_max_cm = (self.mesh_view.scale_max_cm()
+                                if self.mesh_view.has_mesh() else None),
+                verts_real   = res.get("verts_real"),
+                verts_ref    = res.get("verts_synth"),
+                faces        = res.get("faces"),
+                study_info   = {
+                    "views":        len(STATE.view_names),
+                    "method":       res.get("method"),
+                    "ideal_weight": res.get("ideal_weight"),
+                    "height_cm":    STATE.height_cm,
+                    "only_neck":    STATE.only_neck_mode,
+                },
             )
             self.lbl_status.setText("PDF exportado ✓")
             QMessageBox.information(self,"PDF","Guardado en:\n"+save_path)
