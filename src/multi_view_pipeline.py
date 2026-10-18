@@ -35,14 +35,47 @@ VIEW_ZONES = {
 }
 
 # Zonas esperadas por vista
+# Brazo, muslo y rodilla se miden POR LADO (izq/der).
+#   · frontal / posterior: se ve el ancho de cada lado → ambos lados.
+#   · lateral_izq / lateral_der: se ve el grosor (profundidad) del lado que
+#     da a la cámara → solo el lado correspondiente a esa vista.
 ZONES_PER_VIEW = {
-    "frontal":     ["cuello", "pecho", "brazo_izq", "brazo_der", "cintura", "cadera"],
-    "posterior":   ["brazo_izq", "brazo_der", "cintura", "cadera"],
-    "lateral_izq": ["muslo", "rodilla", "prof_pecho", "prof_cintura"],
-    "lateral_der": ["muslo", "rodilla", "prof_pecho", "prof_cintura"],
+    "frontal":     ["cuello", "pecho", "brazo_izq", "brazo_der", "cintura",
+                    "cadera", "muslo_izq", "muslo_der",
+                    "rodilla_izq", "rodilla_der"],
+    "posterior":   ["brazo_izq", "brazo_der", "cintura", "cadera",
+                    "muslo_izq", "muslo_der", "rodilla_izq", "rodilla_der"],
+    "lateral_izq": ["brazo_izq", "muslo_izq", "rodilla_izq",
+                    "prof_pecho", "prof_cintura"],
+    "lateral_der": ["brazo_der", "muslo_der", "rodilla_der",
+                    "prof_pecho", "prof_cintura"],
 }
 
-IMG_CENTER_X = 640
+# Relación profundidad/ancho (anatómica) para el tronco y el cuello. Se usa
+# cuando no se logra medir el grosor en la vista lateral. SIN esto, la
+# profundidad caía al "delta" frontal (p90-p10 de la profundidad dentro de
+# la fila, solo 4-9 cm: mide cuánto se curva el frente, no el grosor real
+# del cuerpo) y las circunferencias salían entre 10 y 30 % cortas.
+DEPTH_WIDTH_RATIO = {
+    "cuello":  0.85,   # el cuello es casi circular (siempre se usa)
+    "pecho":   0.70,
+    "cintura": 0.65,
+    "cadera":  0.65,
+}
+
+# Relación profundidad/ancho para brazo, muslo y rodilla cuando NO hay vista
+# lateral de ese lado (las extremidades son casi circulares).
+LIMB_DEPTH_RATIO = 0.90
+
+
+def _base_zone(zone: str) -> str:
+    """'muslo_izq' → 'muslo'; 'cintura' → 'cintura'."""
+    for suf in ("_izq", "_der"):
+        if zone.endswith(suf):
+            return zone[: -len(suf)]
+    return zone
+
+IMG_CENTER_X = 320   # centro horizontal de una imagen de 640x480
 BAND         = 8   # ±px alrededor del landmark para promediar filas
 
 # Offset de paralaje RGB → Depth (calibrado con calibrate_parallax.py)
@@ -173,6 +206,38 @@ def _silhouette_x_bounds(mask: np.ndarray, y_center: int,
     return int(cols.min()), int(cols.max())
 
 
+def _run_bounds(mask, y_center, x_center, x_lo, x_hi, band=BAND):
+    """
+    Límites X del tramo continuo de silueta que contiene (o queda más
+    cerca de) x_center, dentro de la banda y_center±band y de [x_lo, x_hi].
+    Sirve para aislar UNA pierna aunque la otra esté pegada.
+    Devuelve None si no hay silueta en esa banda.
+    """
+    if mask is None:
+        return None
+    H, W = mask.shape[:2]
+    y1 = max(0, y_center - band)
+    y2 = min(H - 1, y_center + band)
+    x_lo = max(0, x_lo); x_hi = min(W, x_hi)
+    if x_hi - x_lo < 3:
+        return None
+    sl  = mask[y1:y2 + 1, x_lo:x_hi] == 255
+    occ = sl.mean(axis=0) >= 0.5
+    if not occ.any():
+        return None
+    xs = np.where(occ)[0]
+    # separar en tramos continuos
+    runs, start = [], xs[0]
+    for a, b in zip(xs[:-1], xs[1:]):
+        if b != a + 1:
+            runs.append((start, a)); start = b
+    runs.append((start, xs[-1]))
+    xc = x_center - x_lo
+    best = min(runs, key=lambda r: 0 if r[0] <= xc <= r[1]
+               else min(abs(xc - r[0]), abs(xc - r[1])))
+    return int(best[0] + x_lo), int(best[1] + x_lo + 1)
+
+
 def _auto_zones_frontal_posterior(
     landmarks: list, H: int, W: int,
     mask: np.ndarray = None,
@@ -239,7 +304,30 @@ def _auto_zones_frontal_posterior(
     y_brazo_der = (y_sh + y_co_der) // 2
     x_brazo_izq = (x_sh_izq + x_co_izq) // 2
     x_brazo_der = (x_sh_der + x_co_der) // 2
-    brazo_half  = 22
+    # Semiancho de la ventana del brazo: calibrado en 1280 px de ancho
+    brazo_half  = max(6, int(round(22 * W / 1280.0)))
+    brazo_vhalf = max(10, int(round(34 * H / 720.0)))   # semialto (brazo horizontal)
+
+    def _arm_zone(sh_idx, el_idx):
+        """Zona del brazo: vertical (colgando) u horizontal (extendido)."""
+        xs_, ys_ = _lm_x(landmarks, sh_idx, W, p), _lm_y(landmarks, sh_idx, H, p)
+        xe_, ye_ = _lm_x(landmarks, el_idx, W, p), _lm_y(landmarks, el_idx, H, p)
+        xm, ym = (xs_ + xe_) // 2, (ys_ + ye_) // 2
+        if abs(xe_ - xs_) > 1.2 * abs(ye_ - ys_):          # extendido
+            return {
+                "y_center":  ym,
+                "rows":      (max(0, ym - brazo_vhalf), min(H - 1, ym + brazo_vhalf)),
+                "width_pct": 100.0,
+                "x1": max(0, xm - brazo_half), "x2": min(W, xm + brazo_half),
+                "orient": "h",
+            }
+        return {                                            # colgando
+            "y_center":  ym,
+            "rows":      _band(ym, H),
+            "width_pct": 100.0,
+            "x1": max(0, xm - brazo_half), "x2": min(W, xm + brazo_half),
+            "orient": "v",
+        }
 
     def zone_from_mask(y_c, zone_name):
         """
@@ -304,21 +392,47 @@ def _auto_zones_frontal_posterior(
         "pecho":     zone_from_mask(y_pecho,   "pecho"),
         "cintura":   zone_from_mask(y_cintura, "cintura"),
         "cadera":    zone_from_mask(y_cadera,  "cadera"),
-        "brazo_izq": {
-            "y_center":  y_brazo_izq,
-            "rows":      _band(y_brazo_izq, H),
-            "width_pct": 100.0,
-            "x1": max(0, x_brazo_izq - brazo_half),
-            "x2": min(W, x_brazo_izq + brazo_half),
-        },
-        "brazo_der": {
-            "y_center":  y_brazo_der,
-            "rows":      _band(y_brazo_der, H),
-            "width_pct": 100.0,
-            "x1": max(0, x_brazo_der - brazo_half),
-            "x2": min(W, x_brazo_der + brazo_half),
-        },
+        "brazo_izq": _arm_zone(11, 13),
+        "brazo_der": _arm_zone(12, 14),
     }
+
+    # ── Muslo y rodilla, cada pierna por separado ─────────────────────────
+    # Y desde landmarks (cadera 23/24, rodilla 25/26); X = tramo continuo de
+    # silueta de ESA pierna, separado de la otra por la línea media entre
+    # ambas caderas.
+    x_h_izq = _lm_x(landmarks, 23, W, p); x_h_der = _lm_x(landmarks, 24, W, p)
+    x_split = (x_h_izq + x_h_der) // 2
+    leg_half = max(6, int(round(18 * W / 640.0)))
+
+    def _leg_zone(hip_idx, knee_idx, kind, is_izq):
+        yh = _lm_y(landmarks, hip_idx, H, p)
+        yk = _lm_y(landmarks, knee_idx, H, p)
+        if yk <= yh + 10:                       # rodilla mal detectada
+            yk = min(H - 1, yh + int(0.25 * H))
+        if kind == "muslo":
+            y_c = yh + int(0.35 * (yk - yh))
+            x_c = _lm_x(landmarks, hip_idx, W, p)
+        else:
+            y_c = yk
+            x_c = _lm_x(landmarks, knee_idx, W, p)
+        # lado de la imagen que le toca a esta pierna
+        izq_en_izquierda = x_h_izq < x_h_der
+        left_side = (is_izq == izq_en_izquierda)
+        x_lo, x_hi = (0, x_split) if left_side else (x_split, W)
+        run = _run_bounds(mask, y_c, x_c, x_lo, x_hi)
+        if run is None or run[1] - run[0] < 6:
+            run = (max(0, x_c - leg_half), min(W, x_c + leg_half))
+        return {
+            "y_center":  y_c,
+            "rows":      _band(y_c, H),
+            "width_pct": 100.0,
+            "x1": run[0], "x2": run[1],
+        }
+
+    zones["muslo_izq"]   = _leg_zone(23, 25, "muslo",   True)
+    zones["muslo_der"]   = _leg_zone(24, 26, "muslo",   False)
+    zones["rodilla_izq"] = _leg_zone(23, 25, "rodilla", True)
+    zones["rodilla_der"] = _leg_zone(24, 26, "rodilla", False)
 
     return zones
 
@@ -327,6 +441,7 @@ def _auto_zones_lateral(
     landmarks: list, H: int, W: int,
     y_pecho_ref: int, y_cintura_ref: int,
     mask: np.ndarray = None,
+    side: str = "izq",
 ) -> dict:
     """
     Calcula zonas automáticas para vistas laterales.
@@ -425,8 +540,25 @@ def _auto_zones_lateral(
     zones = {
         "prof_pecho":   zone(y_pecho_ref,   band_x=25),
         "prof_cintura": zone(y_cintura_ref, band_x=25),
-        "muslo":        zone_thigh(y_muslo),
-        "rodilla":      zone_knee(y_rodilla),
+        f"muslo_{side}":   zone_thigh(y_muslo),
+        f"rodilla_{side}": zone_knee(y_rodilla),
+    }
+
+    # Brazo del lado que da a la cámara (grosor del brazo en la vista lateral)
+    sh_i, el_i = (11, 13) if side == "izq" else (12, 14)
+    y_sh_l = _lm_y(landmarks, sh_i, H, True)
+    y_el_l = _lm_y(landmarks, el_i, H, True)
+    x_sh_l = _lm_x(landmarks, sh_i, W, True)
+    x_el_l = _lm_x(landmarks, el_i, W, True)
+    y_br   = (y_sh_l + y_el_l) // 2
+    x_br   = (x_sh_l + x_el_l) // 2
+    half_b = max(6, int(round(22 * W / 1280.0)))
+    zones[f"brazo_{side}"] = {
+        "y_center":  y_br,
+        "rows":      _band(y_br, H),
+        "width_pct": 100.0,
+        "x1": max(0, x_br - half_b), "x2": min(W, x_br + half_b),
+        "orient": "v",
     }
 
     return zones
@@ -479,7 +611,7 @@ def extract_zone_at_norm(
     y_end   = min(mask.shape[0] - 1, y_world + band)
     return measure_row_range(
         mask, depth_body, y_start, y_end,
-        width_percentile=ZONE_WIDTH_PCT.get(zone_name, 100.0),
+        width_percentile=ZONE_WIDTH_PCT.get(_base_zone(zone_name), 100.0),
     )
 
 
@@ -510,8 +642,26 @@ def measure_zone_rect(mask, depth_body, x1, y1, x2, y2):
             "depth_mm": depth_ref, "delta_mm": delta_mm}
 
 
+def measure_arm_rect(mask, depth_body, x1, y1, x2, y2, orient=None):
+    """
+    Mide el ANCHO de un brazo dentro de un rectángulo.
+
+    · orient "v" (brazo colgando): se cuentan píxeles activos por FILA.
+    · orient "h" (brazo extendido, p.ej. pose en T): el grosor del brazo
+      es vertical, así que se cuentan píxeles activos por COLUMNA.
+    Si orient es None se deduce de la forma del rectángulo (más ancho que
+    alto → brazo horizontal).
+    """
+    if orient is None:
+        orient = "h" if (x2 - x1) > 1.3 * (y2 - y1) else "v"
+    if orient == "h":
+        # Transponer: las columnas pasan a ser filas
+        return measure_zone_rect(mask.T, depth_body.T, y1, x1, y2, x2)
+    return measure_zone_rect(mask, depth_body, x1, y1, x2, y2)
+
+
 def measure_symmetric_zone(mask, depth_body, x1, y1, x2, y2,
-                            img_center_x=640):
+                            img_center_x=320):
     """Mide una zona y su simétrica."""
     d1     = measure_zone_rect(mask, depth_body, x1, y1, x2, y2)
     zone_w = x2 - x1
@@ -622,6 +772,7 @@ def combine_measurements(
                 d["lm"], d["H"], d["W"],
                 y_pecho_ref, y_cintura_ref,
                 mask=msk,
+                side=("izq" if vname == "lateral_izq" else "der"),
             )
 
     # ── Helpers de medición ───────────────────────────────────────────────────
@@ -634,6 +785,11 @@ def combine_measurements(
         z = VIEW_ZONES.get(view_name, {}).get(zone)
         if not z:
             return None
+        if _base_zone(zone) == "brazo":
+            return measure_arm_rect(
+                vd["mask"], vd["depth_body"],
+                z["x1"], z["y1"], z["x2"], z["y2"]
+            )
         return measure_zone_rect(
             vd["mask"], vd["depth_body"],
             z["x1"], z["y1"], z["x2"], z["y2"]
@@ -653,6 +809,12 @@ def combine_measurements(
         x2 = zone_cfg.get("x2", vd["mask"].shape[1])
         # Si hay x1/x2 específicos (brazos), usar measure_zone_rect
         if x1 > 0 or x2 < vd["mask"].shape[1]:
+            if _base_zone(zone) == "brazo":
+                return measure_arm_rect(
+                    vd["mask"], vd["depth_body"],
+                    x1, y_start, x2, y_end,
+                    orient=zone_cfg.get("orient"),
+                )
             return measure_zone_rect(
                 vd["mask"], vd["depth_body"],
                 x1, y_start, x2, y_end
@@ -666,9 +828,16 @@ def combine_measurements(
     def _measure_fallback(view_name: str, zone: str) -> dict | None:
         """Mide usando posición normalizada anatómica (último recurso)."""
         vd = views[view_name]
-        if vd["mask"] is None:
-            return None
-        y_norm = ANATOMICAL_NORM.get(zone)
+        if vd["mask"] is None or rgbs.get(view_name) is None:
+            return None     # vista no cargada (máscara de relleno)
+        base = _base_zone(zone)
+        # Sin landmarks no se puede aislar un solo brazo/pierna en vistas
+        # frontal/posterior (la fila abarcaría ambos lados) ni el brazo en
+        # lateral (se funde con el torso): sin dato.
+        if base in ("brazo", "muslo", "rodilla"):
+            if view_name in ("frontal", "posterior") or base == "brazo":
+                return None
+        y_norm = ANATOMICAL_NORM.get(base)
         if y_norm is None:
             return None
         return extract_zone_at_norm(
@@ -730,54 +899,30 @@ def combine_measurements(
             circ_mm = compute_circumference(width_mm, depth_mm)
             circ_cm = round(circ_mm / 10.0, 1)
 
-            # Obtener coordenadas del rectángulo para visualización
-            # El cuadrante usa los límites reales de la silueta en esa banda Y
-            rect = None
-            manual_z = VIEW_ZONES.get(view_name, {}).get(_zone_for_rect)
-            if manual_z:
-                rect = {"x1": manual_z["x1"], "y1": manual_z["y1"],
-                        "x2": manual_z["x2"], "y2": manual_z["y2"],
-                        "view": view_name}
-            else:
-                zone_cfg = auto_zones.get(view_name, {}).get(_zone_for_rect)
-                if zone_cfg:
-                    y_start, y_end = zone_cfg["rows"]
-                    # Usar x1/x2 calculados desde los landmarks en auto_zones
-                    x1 = zone_cfg.get("x1", 0)
-                    x2 = zone_cfg.get("x2", 1280)
-                    rect = {"x1": x1, "y1": y_start,
-                            "x2": x2, "y2": y_end,
-                            "view": view_name}
+            # Rectángulos para visualización: se buscan en TODAS las vistas
+            # donde exista esta zona (marcada a mano o automática).
+            def _rect_for(vn):
+                mz = VIEW_ZONES.get(vn, {}).get(_zone_for_rect)
+                if mz:
+                    return {"x1": mz["x1"], "y1": mz["y1"],
+                            "x2": mz["x2"], "y2": mz["y2"], "view": vn}
+                cfg = auto_zones.get(vn, {}).get(_zone_for_rect)
+                if cfg:
+                    ys, ye = cfg["rows"]
+                    return {"x1": cfg.get("x1", 0), "y1": ys,
+                            "x2": cfg.get("x2", views[vn]["mask"].shape[1]
+                                          if views[vn].get("mask") is not None
+                                          else 640),
+                            "y2": ye, "view": vn}
+                return None
 
-            # Generar rects para TODAS las vistas donde existe la zona
-            # (no solo la vista principal de medición)
             all_rects = {}
-            if rect:
-                all_rects[rect["view"]] = rect
-
-            # Agregar rects de vistas adicionales para visualización
-            extra_views = {
-                "cuello":  ["posterior"],
-                "pecho":   ["posterior"],
-                "cintura": ["posterior"],
-                "cadera":  ["posterior"],
-                "brazo":   ["posterior"],
-                "muslo":   ["lateral_der"],
-                "rodilla": ["lateral_der"],
-            }
-            for extra_view in extra_views.get(zone, []):
-                zone_key = _zone_for_rect
-                # Para brazos buscar brazo_izq en la vista extra
-                extra_cfg = auto_zones.get(extra_view, {}).get(zone_key)
-                if extra_cfg:
-                    ys, ye = extra_cfg["rows"]
-                    ex1 = extra_cfg.get("x1", 0)
-                    ex2 = extra_cfg.get("x2", 1280)
-                    all_rects[extra_view] = {
-                        "x1": ex1, "y1": ys,
-                        "x2": ex2, "y2": ye,
-                        "view": extra_view
-                    }
+            for vn in ("frontal", "posterior", "lateral_izq", "lateral_der"):
+                r_ = _rect_for(vn)
+                if r_:
+                    all_rects[vn] = r_
+            rect = all_rects.get(view_name) or (
+                next(iter(all_rects.values())) if all_rects else None)
 
             results[zone] = {
                 "width_mm":         round(width_mm, 1),
@@ -796,15 +941,59 @@ def combine_measurements(
             results[zone] = None
             print(f"  {zone:12s}: -- (sin datos)")
 
+    # ── Grosor (profundidad) desde las vistas laterales ──────────────────────
+    def _lat_from_norm(lat_view: str, y_ref, base: str):
+        """
+        Si en la lateral no hay zona (landmarks que fallan en perfil, o no se
+        marcó prof_pecho/prof_cintura), se mide el grosor de la silueta
+        lateral a la MISMA altura relativa del cuerpo que en la frontal.
+        """
+        # Vista no cargada: la app pasa la máscara frontal como "relleno";
+        # medirla daría el ANCHO frontal como si fuera grosor.
+        if rgbs.get(lat_view) is None:
+            return None
+        lv = views.get(lat_view)
+        fv = views.get("frontal")
+        if lv is None or lv.get("mask") is None:
+            return None
+        y_norm = ANATOMICAL_NORM.get(base)
+        try:
+            if y_ref is not None and fv is not None and fv.get("mask") is not None:
+                span = fv["y_bottom"] - fv["y_top"]
+                if span > 50:
+                    y_norm = (y_ref - fv["y_top"]) / span
+        except Exception:
+            pass
+        if y_norm is None:
+            return None
+        return extract_zone_at_norm(
+            lv["mask"], lv["depth_body"], lv["y_top"], lv["y_bottom"],
+            float(np.clip(y_norm, 0.05, 0.95)), "prof_" + base, band=4)
+
+    def _lat_thickness(prof_key: str, base: str, y_ref):
+        vals = []
+        for lat_view in ("lateral_izq", "lateral_der"):
+            m = _measure(lat_view, prof_key)
+            if m is None:
+                m = _lat_from_norm(lat_view, y_ref, base)
+                if m is not None:
+                    print(f"    · {lat_view}: {prof_key} sin zona → grosor "
+                          f"medido a altura relativa del frontal")
+            if m is not None:
+                vals.append(m)
+        return _avg(*vals) if vals else None
+
     # ── Cuello ────────────────────────────────────────────────────────────────
     f_cuello = _measure("frontal", "cuello")
-    lat_pecho = _avg(
-        _measure("lateral_izq", "prof_pecho"),
-        _measure("lateral_der", "prof_pecho"),
-    )
+    lat_pecho = _lat_thickness("prof_pecho", "pecho", y_pecho_ref)
+    # El grosor del CUELLO no sale de la lateral a la altura del pecho
+    # (daría ~23 cm de profundidad para un cuello de ~11 cm de ancho):
+    # se usa la relación anatómica.
+    _cuello_depth = (f_cuello["width_mm"] * DEPTH_WIDTH_RATIO["cuello"]
+                     if f_cuello else None)
     _store("cuello",
            f_cuello["width_mm"] if f_cuello else None,
-           lat_pecho["width_mm"] if lat_pecho else None,
+           _cuello_depth,
            f_cuello["delta_mm"] if f_cuello else None,
            y_px=_get_y_px("cuello"), view_name="frontal")
 
@@ -812,36 +1001,39 @@ def combine_measurements(
     f_pecho = _measure("frontal", "pecho")
     _store("pecho",
            f_pecho["width_mm"] if f_pecho else None,
-           lat_pecho["width_mm"] if lat_pecho else None,
+           (lat_pecho["width_mm"] if lat_pecho else
+            (f_pecho["width_mm"] * DEPTH_WIDTH_RATIO["pecho"]
+             if f_pecho else None)),
            f_pecho["delta_mm"] if f_pecho else None,
            y_px=_get_y_px("pecho"), view_name="frontal")
 
-    # ── Brazos ────────────────────────────────────────────────────────────────
-    brazo = _avg(
-        _measure("frontal",   "brazo_izq"),
-        _measure("frontal",   "brazo_der"),
-        _measure("posterior", "brazo_izq"),
-        _measure("posterior", "brazo_der"),
-    )
-    # Para el brazo usar brazo_izq como zona de referencia para el rect
-    _store("brazo",
-           brazo["width_mm"] if brazo else None,
-           None,
-           brazo["delta_mm"] if brazo else None,
-           y_px=_get_y_px("brazo_izq"), view_name="frontal",
-           zone_override="brazo_izq")
+    # ── Brazos, muslos y rodillas: izquierdo y derecho por separado ───────────
+    # Ancho = promedio de frontal y posterior (ese lado).
+    # Profundidad = grosor medido en la vista lateral de ese lado; si no hay
+    # lateral se usa LIMB_DEPTH_RATIO × ancho.
+    side_dep = {}
+    for _base in ("brazo", "muslo", "rodilla"):
+        for _side in ("izq", "der"):
+            _key = f"{_base}_{_side}"
+            _w = _avg(_measure("frontal", _key), _measure("posterior", _key))
+            _lat = _measure(f"lateral_{_side}", _key)
+            _wmm = _w["width_mm"] if _w else None
+            _dmm = _lat["width_mm"] if _lat else (
+                _wmm * LIMB_DEPTH_RATIO if _wmm else None)
+            _store(_key, _wmm, _dmm,
+                   _w["delta_mm"] if _w else None,
+                   y_px=_get_y_px(_key), view_name="frontal")
 
     # ── Cintura ───────────────────────────────────────────────────────────────
     cin_f = _measure("frontal",   "cintura")
     cin_p = _measure("posterior", "cintura")
     cin   = _avg(cin_f, cin_p) or cin_f
-    lat_cin = _avg(
-        _measure("lateral_izq", "prof_cintura"),
-        _measure("lateral_der", "prof_cintura"),
-    )
+    lat_cin = _lat_thickness("prof_cintura", "cintura", y_cintura_ref)
     _store("cintura",
            cin["width_mm"] if cin else None,
-           lat_cin["width_mm"] if lat_cin else None,
+           (lat_cin["width_mm"] if lat_cin else
+            (cin["width_mm"] * DEPTH_WIDTH_RATIO["cintura"]
+             if cin else None)),
            cin["delta_mm"] if cin else None,
            y_px=_get_y_px("cintura"), view_name="frontal")
 
@@ -851,31 +1043,34 @@ def combine_measurements(
     cad   = _avg(cad_f, cad_p) or cad_f
     _store("cadera",
            cad["width_mm"] if cad else None,
-           lat_cin["width_mm"] if lat_cin else None,
+           (lat_cin["width_mm"] if lat_cin else
+            (cad["width_mm"] * DEPTH_WIDTH_RATIO["cadera"]
+             if cad else None)),
            cad["delta_mm"] if cad else None,
            y_px=_get_y_px("cadera"), view_name="frontal")
 
-    # ── Muslo ─────────────────────────────────────────────────────────────────
-    muslo = _avg(
-        _measure_sym("lateral_izq", "muslo"),
-        _measure_sym("lateral_der", "muslo"),
-    )
-    _store("muslo",
-           muslo["width_mm"] if muslo else None,
-           None,
-           muslo["delta_mm"] if muslo else None,
-           y_px=_get_y_px("muslo", "lateral_izq"), view_name="lateral_izq")
-
-    # ── Rodilla ───────────────────────────────────────────────────────────────
-    rod = _avg(
-        _measure_sym("lateral_izq", "rodilla"),
-        _measure_sym("lateral_der", "rodilla"),
-    )
-    _store("rodilla",
-           rod["width_mm"] if rod else None,
-           None,
-           rod["delta_mm"] if rod else None,
-           y_px=_get_y_px("rodilla", "lateral_izq"), view_name="lateral_izq")
+    # ── Valores globales (promedio de ambos lados) ────────────────────────────
+    # Se conservan "brazo", "muslo" y "rodilla" como promedio izq/der porque
+    # otras partes de la app (PDF, comparación) los usan; no llevan
+    # rectángulos propios para no duplicar el dibujo en las imágenes.
+    for _base in ("brazo", "muslo", "rodilla"):
+        _l = results.get(f"{_base}_izq")
+        _r = results.get(f"{_base}_der")
+        _ok = [d for d in (_l, _r) if d]
+        if not _ok:
+            results[_base] = None
+            continue
+        _mean = lambda k: round(float(np.mean([d[k] for d in _ok])), 1)
+        results[_base] = {
+            "width_mm":         _mean("width_mm"),
+            "depth_mm":         _mean("depth_mm"),
+            "delta_mm":         _mean("delta_mm"),
+            "circumference_mm": _mean("circumference_mm"),
+            "circumference_cm": _mean("circumference_cm"),
+            "y_px":             _ok[0].get("y_px"),
+            "rect":             None,
+            "all_rects":        {},
+        }
 
     print("  " + "-" * 58)
     return results

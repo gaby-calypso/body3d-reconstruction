@@ -34,14 +34,24 @@ _BANDS = [
     ("piernas", "Piernas"),
 ]
 # Circunferencias: (clave en las medidas, clave en la referencia, nombre)
+# El brazo no tiene referencia de regresión (None). Muslo y rodilla usan la misma
+# referencia para ambos lados.
 _CIRCS = [
-    ("cuello",  "neck",    "Cuello"),
-    ("pecho",   "chest",   "Pecho"),
-    ("cintura", "abdomen", "Cintura"),
-    ("cadera",  "hip",     "Cadera"),
-    ("muslo",   "thigh",   "Muslo"),
-    ("rodilla", "knee",    "Rodilla"),
+    ("cuello",      "neck",    "Cuello"),
+    ("pecho",       "chest",   "Pecho"),
+    ("brazo_izq",   None,      "Brazo izq."),
+    ("brazo_der",   None,      "Brazo der."),
+    ("cintura",     "abdomen", "Cintura"),
+    ("cadera",      "hip",     "Cadera"),
+    ("muslo_izq",   "thigh",   "Muslo izq."),
+    ("muslo_der",   "thigh",   "Muslo der."),
+    ("rodilla_izq", "knee",    "Rodilla izq."),
+    ("rodilla_der", "knee",    "Rodilla der."),
 ]
+# Si falta la medida por lado, se usa la zona promedio (formato anterior)
+_CIRC_FALLBACK = {"brazo_izq": "brazo", "brazo_der": "brazo",
+                  "muslo_izq": "muslo", "muslo_der": "muslo",
+                  "rodilla_izq": "rodilla", "rodilla_der": "rodilla"}
 
 
 def _num(value):
@@ -53,6 +63,14 @@ def _num(value):
         return f if f == f else None        # descarta NaN
     except (TypeError, ValueError):
         return None
+
+
+def _circ(meas, key):
+    """Circunferencia de la zona `key`; si no existe por lado, la zona promedio."""
+    v = _num(meas.get(key))
+    if v is None and key in _CIRC_FALLBACK:
+        v = _num(meas.get(_CIRC_FALLBACK[key]))
+    return v
 
 
 def _signed(value, decimals=1, unit=""):
@@ -251,7 +269,7 @@ def generate_pdf(img_path: str,
 
     # ── Vistas de la malla ────────────────────────────────────────────────────
     y_mesh = y_tiles - TILE_H - 10
-    MESH_H = 232.0
+    MESH_H = 204.0
     yy = card(M, y_mesh, CW, MESH_H, "Malla real frente a referencia",
               "Color = diferencia de superficie respecto a la malla de referencia")
     area_top = yy - 2
@@ -313,7 +331,7 @@ def generate_pdf(img_path: str,
 
     # ── Fila de gráficos 1 ────────────────────────────────────────────────────
     y_r1 = y_mesh - MESH_H - 10
-    R1_H = 172.0
+    R1_H = 200.0
     col_gap = 10.0
     col_w = (CW - col_gap) / 2
 
@@ -323,14 +341,14 @@ def generate_pdf(img_path: str,
               "medida · referencia · diferencia")
     rows = []
     for key, ref_key, label in _CIRCS:
-        m = _num(meas_real.get(key))
-        r = _num(synth_meas.get(ref_key))
+        m = _circ(meas_real, key)
+        r = _num(synth_meas.get(ref_key)) if ref_key else None
         if only_neck and key != "cuello":
             r = None if m is None else r
         rows.append((label, m, r))
     max_val = max([v for _, m, r in rows for v in (m, r) if v] or [1.0])
     row_h = (yy - (y_r1 - R1_H) - 24) / len(rows)
-    label_w, num_w = 44.0, 30.0
+    label_w, num_w = 52.0, 30.0
     bar_x = xa + 12 + label_w
     bar_w = col_w - 24 - label_w - 3 * num_w - 6
     y = yy - 4
@@ -470,8 +488,9 @@ def generate_pdf(img_path: str,
 
     circ_axes = []
     for key, ref_key, label in _CIRCS:
-        m_, r_ = _num(meas_real.get(key)), _num(synth_meas.get(ref_key))
-        circ_axes.append((label, m_, r_))
+        m_ = _circ(meas_real, key)
+        r_ = _num(synth_meas.get(ref_key)) if ref_key else None
+        circ_axes.append((label.replace(" izq.", " I").replace(" der.", " D"), m_, r_))
     vol_axes = []
     for key, label in _BANDS:
         zv = zone_volumes.get(key) or {}

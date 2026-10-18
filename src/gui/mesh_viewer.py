@@ -63,6 +63,7 @@ class MeshViewer(QWidget):
         self._verts = None        # (N,3) centrados, y hacia arriba
         self._faces = None        # (F,3) índices
         self._vcol  = None        # (N,3) color por vértice 0-255
+        self._vnrm  = None        # (N,3) normales por vértice (sombreado suave)
         self._vmax_cm = 0.0
         self._zones = {}          # {zona: diferencia media en cm}
         self._yaw = 0.0           # grados; 0 = frontal
@@ -88,7 +89,7 @@ class MeshViewer(QWidget):
         return self._verts is not None
 
     def clear(self):
-        self._verts = self._faces = self._vcol = None
+        self._verts = self._faces = self._vcol = self._vnrm = None
         self._zones = {}
         self._zone_frac = {}
         self._cache = None
@@ -105,6 +106,7 @@ class MeshViewer(QWidget):
         v = np.asarray(verts, dtype=np.float32)
         f = np.asarray(faces, dtype=np.int64)
         d = np.asarray(signed_dists, dtype=np.float32)
+        v = self._face_forward(v)
         v = v - v.mean(axis=0)
 
         # Orientar las caras hacia afuera (para poder descartar las traseras)
@@ -122,12 +124,72 @@ class MeshViewer(QWidget):
                        _COL_NEU + (_COL_NEG - _COL_NEU) * (-t))
 
         self._verts, self._faces, self._vcol = v, f, col.astype(np.float32)
+        self._vnrm = self._vertex_normals(v, f)
         self._neck_frac = self._find_neck(v)
         self._zone_frac = self._find_zone_heights(v, self._neck_frac)
         self._vmax_cm = vmax * 100.0
         self._zones = dict(zone_values or {})
         self._cache = None
         self.update()
+
+    @staticmethod
+    def _face_forward(v):
+        """
+        Gira la malla sobre el eje vertical (Y) para que mire exactamente
+        hacia +Z; así el ángulo 0° del visor es SIEMPRE la vista frontal,
+        90° el lateral y 180° la posterior.
+
+        SMPL ya sale mirando a +Z, pero la malla del reshaper
+        (body_shape_reshaper) sale girada (mira hacia -Z y además con un
+        giro de decenas de grados), por eso los botones Frontal / Lateral /
+        Posterior mostraban otro lado del cuerpo.
+
+        Cómo se detecta la dirección: a la altura de la cadera la sección es
+        más ancha (izquierda-derecha) que profunda (adelante-atrás); el eje
+        menor del análisis de componentes principales es el eje
+        adelante-atrás. El sentido (cuál lado es el frente) se decide con
+        los pies: los dedos quedan por delante del tobillo.
+        """
+        y0, y1 = float(v[:, 1].min()), float(v[:, 1].max())
+        h = y1 - y0
+        if h < 1e-6:
+            return v
+        fr = (v[:, 1] - y0) / h
+        hip = v[(fr > 0.47) & (fr < 0.60)][:, [0, 2]]
+        foot = v[fr < 0.03]
+        ankle = v[(fr > 0.06) & (fr < 0.10)]
+        if len(hip) < 30 or len(foot) < 10 or len(ankle) < 10:
+            return v
+        c = hip - hip.mean(axis=0)
+        w, vec = np.linalg.eigh(np.cov(c.T))
+        a = vec[:, 0].astype(np.float64)          # eje de menor varianza = adelante-atrás
+        # sentido: hacia donde apuntan los dedos de los pies
+        d = (foot[:, [0, 2]].mean(axis=0) - ankle[:, [0, 2]].mean(axis=0))
+        if float(d @ a) < 0:
+            a = -a
+        a /= max(np.linalg.norm(a), 1e-9)
+        # ángulo que hay que girar para que 'a' quede en +Z
+        cs, sn = float(a[1]), float(-a[0])
+        if abs(math.degrees(math.atan2(sn, cs))) < 2.0:
+            return v                              # ya mira de frente
+        x = v[:, 0] * cs + v[:, 2] * sn
+        z = -v[:, 0] * sn + v[:, 2] * cs
+        out = v.copy()
+        out[:, 0], out[:, 2] = x, z
+        return out
+
+    @staticmethod
+    def _vertex_normals(v, f):
+        """Normales por vértice (promedio ponderado por área de sus caras).
+        Se usan para sombrear de forma suave y que no se vean las facetas."""
+        tri = v[f]
+        fn = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])   # ∝ área
+        vn = np.zeros_like(v, dtype=np.float64)
+        for k in range(3):
+            np.add.at(vn, f[:, k], fn)
+        ln = np.linalg.norm(vn, axis=1)
+        ln[ln < 1e-12] = 1e-12
+        return (vn / ln[:, None]).astype(np.float32)
 
     @staticmethod
     def _find_neck(v):
@@ -328,15 +390,31 @@ class MeshViewer(QWidget):
 
         front = nrm[:, 2] > 0.0
         idx = np.nonzero(front)[0]
-        if self._fast and len(idx) > 9000:
-            idx = idx[::2]                       # borrador rápido al girar
+        # IMPORTANTE: antes, en modo "rápido" (al girar o arrastrar) se
+        # dibujaba solo una cara de cada dos (idx[::2]) y eso dejaba huecos
+        # oscuros por toda la malla. Ahora se dibujan SIEMPRE todas las
+        # caras; el modo rápido solo omite el contorno y el antialiasing.
         depth = (p0[idx, 2] + p1[idx, 2] + p2[idx, 2]) / 3.0
         idx = idx[np.argsort(depth)]             # de atrás hacia adelante
+
+        # Sombreado suave: normal de la cara = promedio de las normales de
+        # sus 3 vértices (rotadas igual que la malla), en vez de la normal
+        # plana del triángulo → desaparece el aspecto "facetado".
+        th = math.radians(self._yaw)
+        c_, s_ = math.cos(th), math.sin(th)
+        vn = self._vnrm
+        vnx = vn[:, 0] * c_ + vn[:, 2] * s_
+        vnz = -vn[:, 0] * s_ + vn[:, 2] * c_
+        vnr = np.stack([vnx, vn[:, 1], vnz], axis=1)
+        fnrm = vnr[f[idx]].mean(axis=1)
+        fl = np.linalg.norm(fnrm, axis=1)
+        fl[fl < 1e-12] = 1e-12
+        fnrm /= fl[:, None]
 
         # Luz principal desde arriba-izquierda-frente + luz ambiente
         light = np.array([-0.35, 0.45, 0.82], dtype=np.float32)
         light /= np.linalg.norm(light)
-        shade = 0.42 + 0.58 * np.clip(nrm[idx] @ light, 0.0, 1.0)
+        shade = 0.42 + 0.58 * np.clip(fnrm @ light, 0.0, 1.0)
         base = self._vcol[f[idx]].mean(axis=1)
         rgb = np.clip(base * shade[:, None], 0, 255).astype(np.int32)
 
@@ -344,12 +422,18 @@ class MeshViewer(QWidget):
         fy = sy[f[idx]]
 
         painter = QPainter(pm)
-        painter.setRenderHint(QPainter.Antialiasing, False)
+        # Reposo: antialiasing + contorno del mismo color (sin costuras ni
+        # puntos sueltos). Girando: sin ambos, para que siga fluido.
+        painter.setRenderHint(QPainter.Antialiasing, not self._fast)
         pen = QPen()
         pen.setWidthF(1.0)
         pen.setJoinStyle(Qt.RoundJoin)
         for i in range(len(idx)):
             col = QColor(int(rgb[i, 0]), int(rgb[i, 1]), int(rgb[i, 2]))
+            # También en modo rápido se dibuja el contorno del mismo color:
+            # sin antialiasing y sin contorno, el relleno de triángulos
+            # vecinos deja grietas de un píxel y la malla se ve "agujereada"
+            # (puntitos oscuros) mientras se gira.
             pen.setColor(col)
             painter.setPen(pen)                  # tapa las juntas entre caras
             painter.setBrush(col)

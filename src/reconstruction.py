@@ -32,10 +32,12 @@ import open3d as o3d
 
 
 # ── Parámetros intrínsecos D455 (datasheet March 2022, depth HD 1280x720) ────
-FX = 674.42   # focal length horizontal en píxeles
-FY = 649.46   # focal length vertical en píxeles
-CX = 640.00   # centro óptico horizontal (cx) en píxeles
-CY = 360.00   # centro óptico vertical (cy) en píxeles
+# Resolución por defecto de la cámara: 640x480 (mismos valores que
+# src/measurements.py: 674.42/2, 649.46*480/720, 640/2, 480/2)
+FX = 337.21   # focal length horizontal en píxeles
+FY = 432.97   # focal length vertical en píxeles
+CX = 320.00   # centro óptico horizontal (cx) en píxeles
+CY = 240.00   # centro óptico vertical (cy) en píxeles
 DEPTH_SCALE = 1.0  # los valores ya están en mm, sin conversión necesaria
 
 

@@ -44,8 +44,8 @@ ZONE_SIGMA = {
 }
 
 # Parámetros intrínsecos D455 para convertir Y imagen → Y mundo
-FY = 649.46
-CY = 360.00
+FY = 432.97   # 640x480 (igual que measurements.py / reconstruction.py)
+CY = 240.00
 
 def gaussian_influence(y_world: np.ndarray,
                         y_center: float,

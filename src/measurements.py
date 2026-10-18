@@ -42,6 +42,8 @@ CY = 240.00
 # Determinadas empíricamente del análisis de distribución de la silueta.
 # rows:      (y_start, y_end) — banda de filas a promediar para robustez
 # width_pct: fracción del ancho central a usar (excluye brazos pegados al cuerpo)
+ZONES_REF_H = 720   # alto de la imagen para la que se calibró BODY_ZONES
+
 BODY_ZONES = {
     "cuello":  {"rows": (284, 292), "width_pct": 100.0},
     "pecho":   {"rows": (371, 381), "width_pct":  75.0},
@@ -50,7 +52,8 @@ BODY_ZONES = {
 }
 
 
-def build_zones(rgb_image: Optional[np.ndarray] = None) -> dict:
+def build_zones(rgb_image: Optional[np.ndarray] = None,
+                img_height: Optional[int] = None) -> dict:
     """
     Devuelve el diccionario de zonas de medición en formato unificado.
 
@@ -60,18 +63,30 @@ def build_zones(rgb_image: Optional[np.ndarray] = None) -> dict:
 
     Args:
         rgb_image: ignorado (mantenido por compatibilidad de firma)
+        img_height: alto real de la imagen; reescala las filas de 720 px
 
     Returns:
         dict {zona: {"y_center": int, "rows": (y_start, y_end), "width_pct": float}}
     """
-    return {
-        name: {
-            "y_center":  (cfg["rows"][0] + cfg["rows"][1]) // 2,
-            "rows":       cfg["rows"],
+    # BODY_ZONES está definido en filas de una imagen de 720 px de alto.
+    # Se reescala al alto real (p.ej. 480) y se limita al tamaño de la
+    # imagen; sin esto las filas 483-493 quedan fuera de una imagen de 480.
+    k    = (img_height / ZONES_REF_H) if img_height else 1.0
+    last = (img_height - 1) if img_height else None
+
+    def _r(v):
+        v = int(round(v * k))
+        return min(v, last) if last is not None else v
+
+    zones = {}
+    for name, cfg in BODY_ZONES.items():
+        y0, y1 = _r(cfg["rows"][0]), _r(cfg["rows"][1])
+        zones[name] = {
+            "y_center":  (y0 + y1) // 2,
+            "rows":       (y0, y1),
             "width_pct":  cfg["width_pct"],
         }
-        for name, cfg in BODY_ZONES.items()
-    }
+    return zones
 
 
 # ── Proyección y geometría ────────────────────────────────────────────────────
@@ -148,6 +163,9 @@ def measure_row_range(mask: np.ndarray,
     deltas     = []
     best_y     = y_start
     best_count = 0
+
+    y_start = max(0, y_start)
+    y_end   = min(mask.shape[0] - 1, y_end)
 
     for y in range(y_start, y_end + 1):
         row_mask  = mask[y, :] == 255
@@ -237,7 +255,7 @@ def extract_measurements(mask: np.ndarray,
         dict por zona con width_mm, delta_mm, circumference_mm, circumference_cm, y_px
     """
     if zones is None:
-        zones = build_zones()
+        zones = build_zones(img_height=mask.shape[0])
 
     results = {}
 

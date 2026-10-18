@@ -66,7 +66,17 @@ RADIUS_SM = 9
 FONT_FAMILY = '"Figtree", "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif'
 FONT_MONO   = '"IBM Plex Mono", "JetBrains Mono", "Consolas", "Menlo", monospace'
 
-ZONES = ["cuello", "pecho", "brazo", "cintura", "cadera", "muslo", "rodilla"]
+# Brazo, muslo y rodilla se miden por lado (izquierdo / derecho)
+ZONES = ["cuello", "pecho", "brazo_izq", "brazo_der", "cintura", "cadera",
+         "muslo_izq", "muslo_der", "rodilla_izq", "rodilla_der"]
+
+
+def zone_label(zone: str) -> str:
+    """Nombre legible: 'brazo_izq' → 'Brazo izquierdo'."""
+    for suf, txt in (("_izq", " izquierdo"), ("_der", " derecho")):
+        if zone.endswith(suf):
+            return zone[: -len(suf)].capitalize() + txt
+    return zone.capitalize()
 
 VIEW_LABELS = {
     "frontal": "Frontal", "posterior": "Posterior",
@@ -406,11 +416,17 @@ class AppState:
         self.n_views = n
         names = ["frontal","posterior","lateral_izq","lateral_der"]
         self.view_names = names[:n]
+        # ROI por defecto: X 11–69 %, Y 14–92 % de la imagen. Se guardan en
+        # coordenadas de 1280x720 (la app las reescala al tamaño real de la
+        # imagen al cargarla): 142/1280=11.1 %, 884/1280=69.1 %,
+        # 102/720=14.2 %, 664/720=92.2 %; en 640x480 los deslizadores
+        # quedan exactamente en 11 / 69 / 14 / 92.
+        _roi_xy = {"x1": 142, "x2": 884, "y1": 102, "y2": 664}
         defaults = {
-            "frontal":     {"x1":396,"x2":755,"y1":0,"y2":626,"d_min":1410,"d_max":1790},
-            "posterior":   {"x1":409,"x2":780,"y1":0,"y2":626,"d_min":1180,"d_max":1720},
-            "lateral_izq": {"x1":448,"x2":716,"y1":0,"y2":669,"d_min":1090,"d_max":1490},
-            "lateral_der": {"x1":422,"x2":729,"y1":0,"y2":626,"d_min":930, "d_max":1750},
+            "frontal":     {**_roi_xy, "d_min":1410,"d_max":1790},
+            "posterior":   {**_roi_xy, "d_min":1180,"d_max":1720},
+            "lateral_izq": {**_roi_xy, "d_min":1090,"d_max":1490},
+            "lateral_der": {**_roi_xy, "d_min":930, "d_max":1750},
         }
         for name in self.view_names:
             if name not in self.roi_params:
@@ -587,13 +603,8 @@ class PipelineThread(QThread):
                 } for k, v in meas.items() if v}
                 # ──────────────────────────────────────────────────────────────
 
-                # Altura
-                seg_f = segs["frontal"]
-                rows  = np.where(seg_f["mask"].sum(axis=1) > 10)[0]
-                hp    = int(rows.max()-rows.min()) if len(rows) > 0 else 0
-                d_ref = float(np.median(seg_f["depth_body"]
-                              [seg_f["depth_body"] > 0]))
-                STATE.height_cm = hp * d_ref / FY / 10.0
+                # La altura ya NO se estima desde la cámara: es el dato real
+                # que se ingresa al inicio (STATE.patient["height"]).
 
             STATE.pipeline_done = True
             self.finished.emit({"ok": True})
@@ -1201,6 +1212,10 @@ class ZoneMarkerDialog(QDialog):
         "cadera":      (0,   150, 220),
         "muslo":       (200, 0,   200),
         "rodilla":     (60,  60,  220),
+        "muslo_izq":   (200, 0,   200),
+        "muslo_der":   (150, 0,   200),
+        "rodilla_izq": (60,  60,  220),
+        "rodilla_der": (30,  110, 220),
         "prof_pecho":  (255, 165, 0),
         "prof_cintura":(200, 100, 0),
     }
@@ -1776,7 +1791,7 @@ class Page2Measurements(QWidget):
             row = QFrame(); row.setObjectName(f"mrow_{zone}")
             row.setMinimumHeight(44)
             rl = QHBoxLayout(row); rl.setContentsMargins(10, 0, 10, 0)
-            z_lbl = text_label(zone.capitalize(), 14, TEXT_PRI, 500)
+            z_lbl = text_label(zone_label(zone), 14, TEXT_PRI, 500)
             v_lbl = text_label("Pendiente", 14, TEXT_HINT, 400)
             rl.addWidget(z_lbl); rl.addStretch(); rl.addWidget(v_lbl)
             ml.addWidget(row)
@@ -1785,8 +1800,6 @@ class Page2Measurements(QWidget):
             self._meas_labels[zone] = v_lbl
             self._meas_rows[zone]   = row
         ml.addSpacing(8)
-        self.lbl_height = text_label("Altura estimada: —", 13, TEXT_SEC, 500)
-        ml.addWidget(self.lbl_height)
         rv.addWidget(meas)
 
         self.lbl_status = text_label("Esperando datos...", 13, TEXT_SEC, 400, wrap=True)
@@ -1945,10 +1958,6 @@ class Page2Measurements(QWidget):
                     f"background:transparent;border:none;"
                 )
         self.lbl_meas_count.setText(f"{done} de {len(self._meas_labels)} calculadas")
-        if STATE.height_cm > 0:
-            self.lbl_height.setText(f"Altura estimada: {STATE.height_cm:.1f} cm")
-        else:
-            self.lbl_height.setText("Altura estimada: —")
 
     # ── MODIFICACIÓN 4 ─────────────────────────────────────────────────────────
     def _draw_measurement_rects(self):
@@ -1967,6 +1976,11 @@ class Page2Measurements(QWidget):
             "muslo":   (230, 126,  34),
             "rodilla": (52,   73,  94),
         }
+        # Variantes por lado (izq/der): mismo color base, tono distinto
+        for _b, _c in list(COLORS_BGR.items()):
+            COLORS_BGR.setdefault(f"{_b}_izq", _c)
+            COLORS_BGR.setdefault(
+                f"{_b}_der", tuple(min(255, int(v * 0.65) + 50) for v in _c))
 
         # Agrupar zonas por vista usando all_rects para mostrar en todas
         rects_by_view = {}
@@ -2082,6 +2096,10 @@ class Page2Measurements(QWidget):
                         "cadera":      (0,   150, 200),
                         "muslo":       (200, 0,   200),
                         "rodilla":     (60,  60,  220),
+                        "muslo_izq":   (200, 0,   200),
+                        "muslo_der":   (150, 0,   200),
+                        "rodilla_izq": (60,  60,  220),
+                        "rodilla_der": (30,  110, 220),
                         "prof_pecho":  (255, 165, 0),
                         "prof_cintura":(200, 100, 0),
                     }
@@ -2813,7 +2831,7 @@ class Page3Results(QWidget):
                     "views":        len(STATE.view_names),
                     "method":       res.get("method"),
                     "ideal_weight": res.get("ideal_weight"),
-                    "height_cm":    STATE.height_cm,
+                    "height_cm":    None,   # la altura real ya la da el usuario
                     "only_neck":    STATE.only_neck_mode,
                 },
             )
