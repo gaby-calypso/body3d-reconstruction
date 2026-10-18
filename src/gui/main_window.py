@@ -5,7 +5,7 @@ GUI SomaRecon 3D — 3 páginas con navegación por tabs.
 
 Página 1 — Captura:    selector de vistas, carga RGB+depth, sliders ROI/profundidad, datos paciente
 Página 2 — Mediciones: líneas de medición ajustables, tabla en tiempo real, reconstrucción 3D
-Página 3 — Resultados: comparación SMPL, mapa de volumen, exportar PDF
+Página 3 — Reconstrucción 3D: comparación SMPL, mapa de volumen, exportar PDF
 """
 
 import sys, os, cv2
@@ -398,7 +398,7 @@ class AppState:
         # NOTA: STATE ya no guarda pcds/meshes/fused_pcd/fused_mesh — el
         # pipeline (Ejecutar pipeline) solo segmenta y mide; la
         # reconstrucción de malla ahora se genera bajo demanda al
-        # presionar "Comparar con Malla de Referencia" en Resultados
+        # presionar "Comparar con Malla de Referencia" en Reconstrucción 3D
         # (ver Page3Results._run_smpl), no se guarda en STATE.
         # ── MODIFICACIÓN 1 ─────────────────────────────────────────────────────
         # STATE.measurements ahora guarda el dict completo de extract_measurements
@@ -540,7 +540,7 @@ class PipelineThread(QThread):
             # NO reconstruye mallas 3D ni las fusiona entre vistas. Eso es
             # deliberado: la reconstrucción de malla ahora ocurre solo al
             # presionar "Comparar con Malla de Referencia" en la página de
-            # Resultados (ver Page3Results._run_smpl), y usa un método
+            # Reconstrucción 3D (ver Page3Results._run_smpl), y usa un método
             # distinto (medidas → malla vía reshaper, no fusión ICP de
             # nubes de puntos), que es más rápido, más confiable y no
             # depende de que los ángulos de captura de las 4 vistas estén
@@ -2405,15 +2405,12 @@ class Page3Results(QWidget):
             self.mesh_view.clear()
             self.mesh_view.set_message(self._EMPTY_MSG)
             return
-        zone_stats = res.get("zone_stats", {})
-        zone_values = {}
-        for band in ZONE_BANDS:
-            if STATE.only_neck_mode and band != "cuello":
-                continue      # en modo "solo cuello" las demás no se compararon
-            st = zone_stats.get(band)
-            if st and st.get("mean_cm") is not None:
-                zone_values[band] = float(st["mean_cm"])
-        self.mesh_view.set_mesh(verts, faces, dists, zone_values)
+        # El visor calcula la diferencia de cada etiqueta (cuello, pecho,
+        # brazos, cintura, cadera, muslos y rodillas) sobre la propia malla,
+        # en el mismo lugar donde la señala. En modo "solo cuello" solo se
+        # muestra el cuello (las demás zonas no se compararon).
+        self.mesh_view.set_mesh(verts, faces, dists, None,
+                                only_neck=STATE.only_neck_mode)
 
     def _set_zone_card(self, zone, diff_cm3, pct):
         """Pinta una fila de 'Volumen por zona': valor con signo y barra de color."""
@@ -2474,6 +2471,11 @@ class Page3Results(QWidget):
         ZONE_TO_REGRESSION_KEY = {
             "cuello": "neck", "pecho": "chest", "cintura": "abdomen",
             "cadera": "hip", "muslo": "thigh", "rodilla": "knee",
+            "muslo_izq": "thigh", "muslo_der": "thigh",
+            "rodilla_izq": "knee", "rodilla_der": "knee",
+            # El brazo no está en el modelo de regresión: su referencia es la
+            # circunferencia del brazo de la malla de referencia.
+            "brazo_izq": "arm_izq", "brazo_der": "arm_der",
         }
         synth_meas = (STATE.smpl_result or {}).get("synth_meas", {})
 
@@ -2669,6 +2671,19 @@ class Page3Results(QWidget):
                     except Exception as e:
                         print(f"  ⚠ No se pudo calcular volumen por zona: {e}")
                         zone_volumes = {}
+                    # Referencia del brazo: el modelo de regresión no la tiene,
+                    # así que se mide en la malla de referencia (misma altura
+                    # y plano que la medida del brazo en la malla real).
+                    synth_meas = dict(synth_meas)
+                    if not only_neck:
+                        try:
+                            from src.body_regions import arm_reference_cm
+                            arm_ref = arm_reference_cm(verts_synth)
+                            for side in ("izq", "der"):
+                                if arm_ref.get(side):
+                                    synth_meas[f"arm_{side}"] = round(arm_ref[side], 1)
+                        except Exception as e:
+                            print(f"  ⚠ No se pudo medir el brazo de referencia: {e}")
                     STATE.smpl_result = {
                         "zone_stats":   zone_stats,
                         "zone_volumes": zone_volumes,
@@ -2677,7 +2692,7 @@ class Page3Results(QWidget):
                         "synth_meas":   synth_meas,
                         "ideal_weight": ideal_weight,
                         "method":       method_label,
-                        # Datos para el visor 3D giratorio de Resultados
+                        # Datos para el visor 3D giratorio de Reconstrucción 3D
                         "verts_real":   np.asarray(verts_real, dtype=np.float32),
                         "faces":        np.asarray(faces, dtype=np.int64),
                         "signed_dists": np.asarray(signed_dists, dtype=np.float32),
@@ -2847,7 +2862,7 @@ class Page3Results(QWidget):
 # ══════════════════════════════════════════════════════════════════════════════
 class MainWindow(QMainWindow):
 
-    STEPS = ["Captura", "Mediciones", "Resultados"]
+    STEPS = ["Captura", "Mediciones", "Reconstrucción 3D"]
 
     def __init__(self):
         super().__init__()

@@ -1,7 +1,7 @@
 """
 mesh_viewer.py
 --------------
-Visor 3D giratorio de la malla reconstruida para la pantalla de Resultados.
+Visor 3D giratorio de la malla reconstruida para la pantalla de Reconstrucción 3D.
 
 Dibuja UNA sola malla (la real) coloreada con la diferencia respecto a la
 malla de referencia: rojo donde la real es mayor, azul donde es menor.
@@ -20,6 +20,8 @@ from PyQt5.QtGui import (
 )
 from PyQt5.QtWidgets import QWidget, QSizePolicy
 
+from src.body_regions import BODY_BANDS, BodyRegions, face_forward
+
 # Colores del mapa de diferencia (divergente, centrado en gris claro)
 _COL_POS = np.array([214, 40, 40], dtype=np.float32)     # rojo: real > referencia
 _COL_NEU = np.array([220, 227, 230], dtype=np.float32)   # sin diferencia
@@ -29,24 +31,27 @@ _TXT_SOFT = "#C5D2D8"
 _TXT_POS  = "#FF9B94"
 _TXT_NEG  = "#9CC8F5"
 
-# Bandas de altura (fracción 0 = pies, 1 = coronilla). Son las mismas que usa
-# compute_zone_statistics en src/volume_comparison.py.
-ZONE_BANDS = {
-    "cuello":  (0.75, 0.85),
-    "pecho":   (0.55, 0.75),
-    "cintura": (0.40, 0.55),
-    "cadera":  (0.25, 0.40),
-    "muslos":  (0.10, 0.25),
-}
-# Lado y altura (fracción) donde se coloca la etiqueta de cada zona
-_LABEL_LAYOUT = {
-    "cuello":  ("left",  0.93),
-    "pecho":   ("right", 0.68),
-    "cintura": ("right", 0.50),
-    "cadera":  ("right", 0.33),
-    "muslos":  ("left",  0.17),
-}
-_LABEL_NAMES = {"muslos": "Muslo"}
+# Bandas de altura (fracción 0 = pies, 1 = coronilla): las mismas que usa
+# compute_zone_statistics en src/volume_comparison.py (viven en body_regions).
+ZONE_BANDS = BODY_BANDS
+
+# Etiquetas de la malla: (zona, nombre, tipo, lado de pantalla fijo)
+#   torso → se ancla al contorno del tronco, del lado indicado de la pantalla
+#   limb  → se ancla al centro del brazo / muslo / rodilla; el lado de la
+#           etiqueta sigue a la extremidad al girar la figura
+_LABELS = [
+    ("cuello",      "Cuello",       "torso", "left",  "cuello", None),
+    ("pecho",       "Pecho",        "torso", "left",  "pecho",  None),
+    ("brazo_der",   "Brazo der.",   "limb",  None,    "brazo",  -1),
+    ("brazo_izq",   "Brazo izq.",   "limb",  None,    "brazo",  +1),
+    ("cintura",     "Cintura",      "torso", "right", "cintura", None),
+    ("cadera",      "Cadera",       "torso", "right", "cadera", None),
+    ("muslo_der",   "Muslo der.",   "limb",  None,    "muslo",  -1),
+    ("muslo_izq",   "Muslo izq.",   "limb",  None,    "muslo",  +1),
+    ("rodilla_der", "Rodilla der.", "limb",  None,    "rodilla", -1),
+    ("rodilla_izq", "Rodilla izq.", "limb",  None,    "rodilla", +1),
+]
+_LABEL_BOX_W = 150
 
 
 class MeshViewer(QWidget):
@@ -70,8 +75,7 @@ class MeshViewer(QWidget):
         self._cache = None        # QPixmap de la malla para (yaw, tamaño)
         self._cache_key = None
         self._drag_x = None
-        self._neck_frac = None
-        self._zone_frac = {}
+        self._regions = None      # BodyRegions de la malla actual
         self._message = ""
         self._fast = False        # calidad reducida mientras se arrastra
 
@@ -91,17 +95,24 @@ class MeshViewer(QWidget):
     def clear(self):
         self._verts = self._faces = self._vcol = self._vnrm = None
         self._zones = {}
-        self._zone_frac = {}
+        self._regions = None
         self._cache = None
         self.set_spinning(False)
         self.update()
 
-    def set_mesh(self, verts, faces, signed_dists, zone_values=None):
+    def set_mesh(self, verts, faces, signed_dists, zone_values=None, only_neck=False):
         """
         verts:        (N,3) vértices de la malla real (metros, y hacia arriba).
         faces:        (F,3) triángulos.
         signed_dists: (N,) diferencia con la referencia en metros (+ = exceso).
-        zone_values:  {zona: diferencia media en cm} para las etiquetas.
+        zone_values:  {zona: diferencia media en cm}; solo se usa para las
+                      zonas que no se puedan calcular sobre la malla.
+        only_neck:    modo "solo cuello": solo se muestra la etiqueta del cuello.
+
+        Las diferencias de cada etiqueta (cuello, pecho, brazos, cintura,
+        cadera, muslos y rodillas) se calculan aquí, sobre las mismas
+        regiones donde se coloca cada punto, para que el número y el lugar
+        señalado coincidan.
         """
         v = np.asarray(verts, dtype=np.float32)
         f = np.asarray(faces, dtype=np.int64)
@@ -125,58 +136,22 @@ class MeshViewer(QWidget):
 
         self._verts, self._faces, self._vcol = v, f, col.astype(np.float32)
         self._vnrm = self._vertex_normals(v, f)
-        self._neck_frac = self._find_neck(v)
-        self._zone_frac = self._find_zone_heights(v, self._neck_frac)
+        self._regions = BodyRegions(v)
         self._vmax_cm = vmax * 100.0
-        self._zones = dict(zone_values or {})
+        zones = {k: float(x["mean_cm"])
+                 for k, x in self._regions.region_stats(d).items()}
+        for k, x in (zone_values or {}).items():
+            zones.setdefault(k, float(x))
+        if only_neck:
+            zones = {k: x for k, x in zones.items() if k == "cuello"}
+        self._zones = zones
         self._cache = None
         self.update()
 
     @staticmethod
     def _face_forward(v):
-        """
-        Gira la malla sobre el eje vertical (Y) para que mire exactamente
-        hacia +Z; así el ángulo 0° del visor es SIEMPRE la vista frontal,
-        90° el lateral y 180° la posterior.
-
-        SMPL ya sale mirando a +Z, pero la malla del reshaper
-        (body_shape_reshaper) sale girada (mira hacia -Z y además con un
-        giro de decenas de grados), por eso los botones Frontal / Lateral /
-        Posterior mostraban otro lado del cuerpo.
-
-        Cómo se detecta la dirección: a la altura de la cadera la sección es
-        más ancha (izquierda-derecha) que profunda (adelante-atrás); el eje
-        menor del análisis de componentes principales es el eje
-        adelante-atrás. El sentido (cuál lado es el frente) se decide con
-        los pies: los dedos quedan por delante del tobillo.
-        """
-        y0, y1 = float(v[:, 1].min()), float(v[:, 1].max())
-        h = y1 - y0
-        if h < 1e-6:
-            return v
-        fr = (v[:, 1] - y0) / h
-        hip = v[(fr > 0.47) & (fr < 0.60)][:, [0, 2]]
-        foot = v[fr < 0.03]
-        ankle = v[(fr > 0.06) & (fr < 0.10)]
-        if len(hip) < 30 or len(foot) < 10 or len(ankle) < 10:
-            return v
-        c = hip - hip.mean(axis=0)
-        w, vec = np.linalg.eigh(np.cov(c.T))
-        a = vec[:, 0].astype(np.float64)          # eje de menor varianza = adelante-atrás
-        # sentido: hacia donde apuntan los dedos de los pies
-        d = (foot[:, [0, 2]].mean(axis=0) - ankle[:, [0, 2]].mean(axis=0))
-        if float(d @ a) < 0:
-            a = -a
-        a /= max(np.linalg.norm(a), 1e-9)
-        # ángulo que hay que girar para que 'a' quede en +Z
-        cs, sn = float(a[1]), float(-a[0])
-        if abs(math.degrees(math.atan2(sn, cs))) < 2.0:
-            return v                              # ya mira de frente
-        x = v[:, 0] * cs + v[:, 2] * sn
-        z = -v[:, 0] * sn + v[:, 2] * cs
-        out = v.copy()
-        out[:, 0], out[:, 2] = x, z
-        return out
+        """Gira la malla para que 0° sea la vista frontal (ver body_regions)."""
+        return face_forward(v)
 
     @staticmethod
     def _vertex_normals(v, f):
@@ -190,91 +165,6 @@ class MeshViewer(QWidget):
         ln = np.linalg.norm(vn, axis=1)
         ln[ln < 1e-12] = 1e-12
         return (vn / ln[:, None]).astype(np.float32)
-
-    @staticmethod
-    def _find_neck(v):
-        """
-        Altura real del cuello (fracción 0-1 de la estatura), buscada en la
-        propia malla: es el corte horizontal MÁS ESTRECHO entre la cabeza y
-        los hombros. Así la etiqueta apunta al cuello aunque la banda fija
-        de la zona (75-85 % de la altura) caiga sobre los hombros.
-        Devuelve None si no se puede determinar.
-        """
-        y0, y1 = float(v[:, 1].min()), float(v[:, 1].max())
-        height = y1 - y0
-        if height < 1e-6:
-            return None
-        frac = (v[:, 1] - y0) / height
-        best, best_w = None, None
-        for f in np.arange(0.76, 0.925, 0.005):
-            m = np.abs(frac - f) < 0.008
-            if m.sum() < 6:
-                continue
-            width = float(v[m, 0].max() - v[m, 0].min())
-            if best_w is None or width < best_w:
-                best, best_w = float(f), width
-        # Si el corte más estrecho sigue siendo muy ancho, no es un cuello
-        # (p. ej. malla sin cabeza): se descarta y se usa la banda fija.
-        if best is None or best_w > 0.16 * height:
-            return None
-        return best
-
-    @staticmethod
-    def _find_zone_heights(v, neck):
-        """
-        Altura (fracción 0-1 de la estatura) donde se SEÑALA cada zona,
-        buscada en la forma de la propia malla en vez de usar alturas fijas:
-
-          cuello  → corte más estrecho entre cabeza y hombros (_find_neck)
-          pecho   → punto más saliente hacia el frente en la parte alta del torso
-          cadera  → corte más ancho de la parte baja del torso
-          cintura → punto medio entre pecho y cadera
-          muslo   → por debajo de la cadera, a media altura del muslo
-
-        Los rangos de búsqueda se expresan respecto a la altura del cuello,
-        para que se adapten a las proporciones de cada cuerpo.
-        """
-        y0, y1 = float(v[:, 1].min()), float(v[:, 1].max())
-        height = max(y1 - y0, 1e-6)
-        frac = (v[:, 1] - y0) / height
-        n = neck if neck is not None else 0.85
-
-        def scan(lo, hi, score):
-            best, best_s = None, None
-            for f in np.arange(lo, hi + 1e-9, 0.005):
-                m = np.abs(frac - f) < 0.008
-                if m.sum() < 6:
-                    continue
-                sc = score(v[m])
-                if best_s is None or sc > best_s:
-                    best, best_s = float(f), sc
-            return best
-
-        def torso_width(pts):
-            # ancho del tronco: tramo continuo alrededor del eje (sin brazos)
-            xs = np.sort(pts[:, 0])
-            gap = 0.035 * height
-            mid = int(np.searchsorted(xs, 0.0))
-            lo_i = min(mid, len(xs) - 1)
-            hi_i = lo_i
-            while lo_i > 0 and xs[lo_i] - xs[lo_i - 1] < gap:
-                lo_i -= 1
-            while hi_i < len(xs) - 1 and xs[hi_i + 1] - xs[hi_i] < gap:
-                hi_i += 1
-            return float(xs[hi_i] - xs[lo_i])
-
-        def front_reach(pts):
-            near = pts[np.abs(pts[:, 0]) < 0.14 * height]
-            return float(near[:, 2].max()) if len(near) else -1e9
-
-        chest = scan(0.78 * n, 0.86 * n, front_reach) or 0.83 * n
-        hip   = scan(0.52 * n, 0.66 * n, torso_width) or 0.60 * n
-        waist = (chest + hip) / 2.0
-        thigh = hip - 0.13
-        out = {"pecho": chest, "cintura": waist, "cadera": hip, "muslos": thigh}
-        if neck is not None:
-            out["cuello"] = neck
-        return out
 
     def set_yaw(self, degrees):
         self._yaw = float(degrees) % 360.0
@@ -328,7 +218,7 @@ class MeshViewer(QWidget):
         # Radio horizontal máximo: no cambia al girar, así la figura no "salta"
         radius_m = float(np.sqrt(v[:, 0] ** 2 + v[:, 2] ** 2).max())
         avail_h = h - 90
-        avail_w = w - 2 * 215          # margen para etiquetas y escala
+        avail_w = w - 2 * 290          # margen para etiquetas y escala
         scale = min(avail_h / max(height_m, 1e-6),
                     avail_w / max(2 * radius_m, 1e-6))
         y_mid = float(v[:, 1].max() + v[:, 1].min()) / 2.0
@@ -445,44 +335,6 @@ class MeshViewer(QWidget):
         painter.end()
         return pm
 
-    def _zone_anchor(self, zone, side):
-        """Punto sobre el contorno del tronco a la altura real de la zona."""
-        v = self._verts
-        y0, y1 = float(v[:, 1].min()), float(v[:, 1].max())
-        height = y1 - y0
-        f = self._zone_frac.get(zone)
-        if f is None:                       # sin detección: centro de la banda
-            lo, hi = ZONE_BANDS[zone]
-            f = (lo + hi) / 2.0
-        mask = np.abs((v[:, 1] - y0) / height - f) < 0.012
-        if mask.sum() < 3:
-            return None
-        cx, cy, scale, y_mid = self._layout()
-        xr, yr, _ = self._project()
-        xs = np.sort(xr[mask])
-        # Recorrer desde el eje hacia afuera y parar en el primer hueco: así
-        # se toma el borde del tronco (o de la pierna) y no el de un brazo.
-        gap = 0.035 * height
-        if side == "left":
-            k = max(0, min(int(np.searchsorted(xs, 0.0)), len(xs) - 1))
-            if zone == "muslos":            # pierna de ese lado, no el eje
-                k = 0
-                while k < len(xs) - 1 and xs[k + 1] - xs[k] < gap and xs[k + 1] < 0:
-                    k += 1
-                x_edge = float(xs[0])
-            else:
-                while k > 0 and xs[k] - xs[k - 1] < gap:
-                    k -= 1
-                x_edge = float(xs[k])
-        else:
-            k = max(0, min(int(np.searchsorted(xs, 0.0)), len(xs) - 1))
-            while k < len(xs) - 1 and xs[k + 1] - xs[k] < gap:
-                k += 1
-            x_edge = float(xs[k])
-        inset = 6.0 if side == "left" else -6.0
-        y_c = y0 + f * height
-        return QPointF(cx + x_edge * scale + inset, cy - (y_c - y_mid) * scale)
-
     # ── Pintado ────────────────────────────────────────────────────────────
     def paintEvent(self, _):
         p = QPainter(self)
@@ -548,43 +400,84 @@ class MeshViewer(QWidget):
             f.setStyleHint(QFont.Monospace)
         return f
 
+    def _label_anchors(self, cx, cy, scale, y_mid):
+        """
+        {zona: (QPointF ancla, lado 'left'|'right')} para el giro actual.
+        El ancla es el punto del cuerpo que se señala; el lado es el de la
+        pantalla en el que queda la etiqueta (sin cruzar el cuerpo).
+        """
+        reg = self._regions
+        if reg is None:
+            return {}
+        th = math.radians(self._yaw)
+        c, s = math.cos(th), math.sin(th)
+        out = {}
+        for zone, _name, kind, fixed_side, key, sgn in _LABELS:
+            if zone not in self._zones:
+                continue
+            if kind == "torso":
+                want = 1.0 if fixed_side == "right" else -1.0
+                best = None
+                for mesh_side in (1, -1):
+                    pt = reg.torso_anchor(key, mesh_side)
+                    xr = float(pt[0] * c + pt[2] * s)
+                    if best is None or xr * want > best[0] * want:
+                        best = (xr, pt)
+                xr, pt = best
+                side = fixed_side
+            else:
+                pt = reg.limb_anchor(key, sgn)
+                if pt is None:
+                    continue
+                xr = float(pt[0] * c + pt[2] * s)
+                side = "right" if xr >= 0 else "left"
+            out[zone] = (QPointF(cx + xr * scale, cy - (float(pt[1]) - y_mid) * scale), side)
+        return out
+
     def _paint_labels(self, p, cx, cy, scale, y_mid):
-        if not self._zones:
+        if not self._zones or self._regions is None:
+            return
+        w, h = self.width(), self.height()
+        anchors = self._label_anchors(cx, cy, scale, y_mid)
+        if not anchors:
             return
         v = self._verts
-        y0, y1 = float(v[:, 1].min()), float(v[:, 1].max())
-        height = y1 - y0
         radius = float(np.sqrt(v[:, 0] ** 2 + v[:, 2] ** 2).max()) * scale
-        w = self.width()
-        # distancia del eje a la etiqueta; deja libre la escala de color
-        gap = max(120.0, min(radius + 36, w / 2.0 - 300))
+        # La etiqueta empieza fuera de la figura (brazos y manos incluidos)
+        gap = max(120.0, min(radius + 24, w / 2.0 - _LABEL_BOX_W - 100))
         top = max(self._zones, key=lambda z: abs(self._zones[z]))
+        names = {z: n for z, n, *_ in _LABELS}
 
-        # Altura de cada etiqueta: la de su zona. Luego se separan las de un
-        # mismo lado para que no se encimen (mínimo 76 px entre centros).
+        # Altura de cada etiqueta = la de su punto; luego se separan las de
+        # un mismo lado para que no se encimen (según el alto de cada caja).
+        def box_h(zone):
+            return 70.0 if zone == top else 50.0
+
         label_y = {}
-        for zone in self._zones:
-            if zone not in _LABEL_LAYOUT:
-                continue
-            side, default_frac = _LABEL_LAYOUT[zone]
-            f = self._zone_frac.get(zone, default_frac)
+        for zone, (pt, side) in anchors.items():
+            y = pt.y()
             if zone == "cuello":
-                f = max(0.90, f + 0.07)           # por encima del brazo
-            label_y[zone] = cy - (y0 + f * height - y_mid) * scale
+                y -= 0.07 * (float(v[:, 1].max() - v[:, 1].min())) * scale   # sobre el hombro
+            label_y[zone] = y
+        lo_lim, hi_lim = 46.0, h - 64.0
         for side_name in ("left", "right"):
-            group = sorted((z for z in label_y if _LABEL_LAYOUT[z][0] == side_name),
+            group = sorted((z for z in label_y if anchors[z][1] == side_name),
                            key=lambda z: label_y[z])
+            for z in group:
+                label_y[z] = min(max(label_y[z], lo_lim), hi_lim)
             for prev, cur in zip(group, group[1:]):
-                if label_y[cur] - label_y[prev] < 76:
-                    label_y[cur] = label_y[prev] + 76
+                need = (box_h(prev) + box_h(cur)) / 2.0 + 4.0
+                if label_y[cur] - label_y[prev] < need:
+                    label_y[cur] = label_y[prev] + need
+            for prev, cur in zip(reversed(group[1:]), reversed(group[:-1])):   # si se pasó del borde inferior
+                if label_y[prev] > hi_lim:
+                    label_y[prev] = hi_lim
+                need = (box_h(prev) + box_h(cur)) / 2.0 + 4.0
+                if label_y[prev] - label_y[cur] < need:
+                    label_y[cur] = label_y[prev] - need
 
-        for zone, value in self._zones.items():
-            if zone not in _LABEL_LAYOUT:
-                continue
-            side = _LABEL_LAYOUT[zone][0]
-            anchor = self._zone_anchor(zone, side)
-            if anchor is None:
-                continue
+        for zone, (anchor, side) in anchors.items():
+            value = self._zones[zone]
             ly = label_y[zone]
             lx = cx - gap if side == "left" else cx + gap
 
@@ -594,11 +487,11 @@ class MeshViewer(QWidget):
             p.setBrush(QColor("#FFFFFF"))
             p.drawEllipse(anchor, 3.5, 3.5)
 
-            name = _LABEL_NAMES.get(zone, zone.capitalize())
-            sign = "+" if value > 0.005 else ("−" if value < -0.005 else "")
+            name = names.get(zone, zone.capitalize())
+            sign = "+" if value > 0.005 else ("\u2212" if value < -0.005 else "")
             txt = f"{sign}{abs(value):.2f} cm"
             highlight = (zone == top)
-            box_w = 150
+            box_w = _LABEL_BOX_W
             x_txt = lx - box_w if side == "left" else lx
             align = Qt.AlignRight if side == "left" else Qt.AlignLeft
 
@@ -624,10 +517,10 @@ class MeshViewer(QWidget):
                 else:
                     val_col = QColor("#FFFFFF")
                 p.setPen(QColor(_TXT_SOFT)); p.setFont(self._f(14, 500))
-                p.drawText(QRectF(x_txt, ly - 26, box_w, 20),
+                p.drawText(QRectF(x_txt, ly - 24, box_w, 20),
                            align | Qt.AlignVCenter, name)
                 p.setPen(val_col); p.setFont(self._f(18, 600, mono=True))
-                p.drawText(QRectF(x_txt, ly - 5, box_w, 26),
+                p.drawText(QRectF(x_txt, ly - 4, box_w, 26),
                            align | Qt.AlignVCenter, txt)
 
     def _paint_scale(self, p, w, h):

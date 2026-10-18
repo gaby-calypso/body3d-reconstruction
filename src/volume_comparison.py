@@ -12,6 +12,8 @@ Fondo blanco, puntos grandes, 4 vistas: frontal, lateral D, posterior, lateral I
 import numpy as np
 import open3d as o3d
 from scipy.spatial import cKDTree
+
+from src.body_regions import BODY_BANDS
 from typing import Tuple, Dict
 import matplotlib
 matplotlib.use("Agg")
@@ -222,15 +224,7 @@ def compute_zone_volumes(mesh_real: o3d.geometry.TriangleMesh,
     y_min, y_max = y.min(), y.max()
     height = y_max - y_min
 
-    zones_frac = {
-        "cabeza":  (0.85, 1.00),
-        "cuello":  (0.75, 0.85),
-        "pecho":   (0.55, 0.75),
-        "cintura": (0.40, 0.55),
-        "cadera":  (0.25, 0.40),
-        "muslos":  (0.10, 0.25),
-        "piernas": (0.00, 0.10),
-    }
+    zones_frac = BODY_BANDS      # bandas anatómicas (src/body_regions.py)
 
     try:
         tm_real  = trimesh.Trimesh(vertices=verts_real,  faces=faces_real,  process=False)
@@ -281,15 +275,7 @@ def compute_zone_statistics(verts_real: np.ndarray,
     y_min, y_max = y.min(), y.max()
     height = y_max - y_min
 
-    zones = {
-        "cabeza":  (0.85, 1.00),
-        "cuello":  (0.75, 0.85),
-        "pecho":   (0.55, 0.75),
-        "cintura": (0.40, 0.55),
-        "cadera":  (0.25, 0.40),
-        "muslos":  (0.10, 0.25),
-        "piernas": (0.00, 0.10),
-    }
+    zones = BODY_BANDS      # bandas anatómicas (src/body_regions.py)
 
     stats = {}
     for zone_name, (frac_lo, frac_hi) in zones.items():

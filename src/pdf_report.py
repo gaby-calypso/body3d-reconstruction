@@ -34,13 +34,13 @@ _BANDS = [
     ("piernas", "Piernas"),
 ]
 # Circunferencias: (clave en las medidas, clave en la referencia, nombre)
-# El brazo no tiene referencia de regresión (None). Muslo y rodilla usan la misma
-# referencia para ambos lados.
+# El brazo no está en el modelo de regresión: su referencia (arm_izq / arm_der)
+# sale de la malla de referencia. Muslo y rodilla usan la misma referencia en ambos lados.
 _CIRCS = [
     ("cuello",      "neck",    "Cuello"),
     ("pecho",       "chest",   "Pecho"),
-    ("brazo_izq",   None,      "Brazo izq."),
-    ("brazo_der",   None,      "Brazo der."),
+    ("brazo_izq",   "arm_izq", "Brazo izq."),
+    ("brazo_der",   "arm_der", "Brazo der."),
     ("cintura",     "abdomen", "Cintura"),
     ("cadera",      "hip",     "Cadera"),
     ("muslo_izq",   "thigh",   "Muslo izq."),
