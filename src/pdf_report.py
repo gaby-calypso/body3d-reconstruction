@@ -245,12 +245,11 @@ def generate_pdf(img_path: str,
     ideal  = _num(info.get("ideal_weight"))
 
     tiles = [
-        ("Paciente", str(pd_.get("name") or "No especificado"), 2.3),
+        ("Voluntario", str(pd_.get("name") or "No especificado"), 2.3),
         ("Sexo",     str(pd_.get("sex") or "—"), 1.25),
         ("Edad",     f"{age:.0f} años" if age is not None else "—", 1.15),
         ("Peso",     f"{weight:.1f} kg" if weight is not None else "—", 1.0),
         ("Talla",    f"{height:.2f} m" if height is not None else "—", 1.0),
-        ("Grasa corporal", f"{fat:.0f} %" if fat is not None else "—", 1.25),
         ("IMC",      f"{bmi:.1f} kg/m²" if bmi is not None else "—", 1.4),
     ]
     gap = 6.0
@@ -272,6 +271,12 @@ def generate_pdf(img_path: str,
     MESH_H = 204.0
     yy = card(M, y_mesh, CW, MESH_H, "Malla real frente a referencia",
               "Color = diferencia de superficie respecto a la malla de referencia")
+    # Nota: el % de grasa NO se midió; es el valor con el que se generó la
+    # malla de referencia. Por eso va aquí y no entre los datos del voluntario.
+    if fat is not None:
+        text(M + CW - 12, y_mesh - 26,
+             f"Referencia generada con {fat:.0f} % de grasa corporal "
+             "(valor supuesto, no medido)", F, 7, SOFT, "right")
     area_top = yy - 2
     area_bot = y_mesh - MESH_H + 22
     area_h = area_top - area_bot

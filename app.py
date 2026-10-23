@@ -12,6 +12,7 @@ from PyQt5.QtWidgets import QApplication
 from PyQt5.QtGui import QFont
 from src.gui.main_window import MainWindow, FONT_FAMILY
 from src.gui.branding import APP_NAME, app_icon
+from scripts.captura_qt import instalar_capturas  # ← NUEVO
 
 
 def main():
@@ -22,6 +23,7 @@ def main():
     app.setFont(QFont(FONT_FAMILY.split(",")[0].strip(' "'), 10))
     window = MainWindow()
     window.show()
+    instalar_capturas()  # ← NUEVO: ⌘⇧S pantallas, ⌘⇧V video de la malla
     sys.exit(app.exec_())
 
 

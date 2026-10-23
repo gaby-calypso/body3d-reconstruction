@@ -68,6 +68,21 @@ DEPTH_WIDTH_RATIO = {
 LIMB_DEPTH_RATIO = 0.90
 
 
+try:
+    from src.calibration import gain_for as _calib_gain
+    from src.calibration import capture_reference as _capture_reference
+except Exception:                      # ejecución fuera del paquete
+    try:
+        from calibration import gain_for as _calib_gain
+        from calibration import capture_reference as _capture_reference
+    except Exception:
+        def _calib_gain(zone):
+            return 1.0
+
+        def _capture_reference(rgb):
+            return None
+
+
 def _base_zone(zone: str) -> str:
     """'muslo_izq' → 'muslo'; 'cintura' → 'cintura'."""
     for suf in ("_izq", "_der"):
@@ -206,41 +221,212 @@ def _silhouette_x_bounds(mask: np.ndarray, y_center: int,
     return int(cols.min()), int(cols.max())
 
 
-def _run_bounds(mask, y_center, x_center, x_lo, x_hi, band=BAND):
+# Tolerancia de profundidad para decidir si un píxel pertenece al cuerpo.
+# Todo lo que esté a más de ±BODY_DEPTH_TOL_MM de la profundidad del eje del
+# cuerpo (pared, mesa, objetos del fondo) se descarta aunque la máscara lo
+# haya dejado pasar. Un torso tiene ~±150 mm de relieve; el fondo está a
+# más de 500 mm.
+BODY_DEPTH_TOL_MM = 220.0
+
+# Semiancho del cuello como fracción del ancho entre hombros (landmarks).
+# La silueta del cuello NO es medible con fiabilidad en una vista frontal:
+# el cabello, la mandíbula y el trapecio ensanchan la silueta (hasta 1.5-2×
+# el cuello real). El cuello real mide ≈ 0.31 × ancho de hombros, así que se
+# acota la caja a esa proporción (centrada en el eje del cuerpo).
+NECK_HALF_FRAC = 0.17
+
+# Tolerancia de profundidad alrededor del eje de un brazo (un brazo es un
+# cilindro de ~±45 mm; la "estela" de borde queda a 100-300 mm).
+ARM_DEPTH_TOL_MM = 90.0
+
+# Eje del brazo = hombro→muñeca (más estable que hombro→codo con brazos
+# estirados, que es el protocolo de captura).
+ARM_AXIS_FROM_WRIST = True
+
+# Niveles del tronco como fracción de la distancia hombros→caderas.
+PECHO_FRAC   = 0.35
+CINTURA_FRAC = 0.55
+CADERA_FRAC  = 0.15
+TORSO_BAND   = 12     # ±filas que se promedian en pecho/cintura/cadera
+
+
+def _body_run(mask, depth, y_center, x_center, half_max, band=BAND,
+              max_gap=4):
     """
-    Límites X del tramo continuo de silueta que contiene (o queda más
-    cerca de) x_center, dentro de la banda y_center±band y de [x_lo, x_hi].
-    Sirve para aislar UNA pierna aunque la otra esté pegada.
-    Devuelve None si no hay silueta en esa banda.
+    Límites X [x1, x2) de la silueta del cuerpo en la fila y_center, aislando
+    el tramo continuo que contiene al eje del cuerpo (x_center).
+
+    A diferencia de min/max sobre la máscara (que se estira hasta brazos
+    extendidos, fondo o ruido), aquí:
+      1. se mira solo la ventana [x_center ± half_max] (límite anatómico
+         derivado de los landmarks: ancho de hombros / caderas);
+      2. si hay depth, se descartan los píxeles cuya profundidad se aleja
+         más de BODY_DEPTH_TOL_MM de la del eje (pared/fondo);
+      3. una columna cuenta como cuerpo si ≥ 50 % de las filas de la banda
+         están ocupadas (robusto al ruido de borde);
+      4. se rellenan huecos de ≤ max_gap px y se toma el tramo continuo que
+         contiene al eje.
+    Devuelve None si no hay silueta utilizable.
     """
     if mask is None:
         return None
     H, W = mask.shape[:2]
-    y1 = max(0, y_center - band)
-    y2 = min(H - 1, y_center + band)
-    x_lo = max(0, x_lo); x_hi = min(W, x_hi)
+    y1 = max(0, int(y_center) - band)
+    y2 = min(H - 1, int(y_center) + band)
+    x_lo = max(0, int(x_center - half_max))
+    x_hi = min(W, int(x_center + half_max))
     if x_hi - x_lo < 3:
         return None
-    sl  = mask[y1:y2 + 1, x_lo:x_hi] == 255
-    occ = sl.mean(axis=0) >= 0.5
+
+    ok = mask[y1:y2 + 1, x_lo:x_hi] == 255
+    if depth is not None:
+        d = depth[y1:y2 + 1, x_lo:x_hi]
+        c0 = max(0, int(x_center) - x_lo - max(3, int(half_max * 0.12)))
+        c1 = min(x_hi - x_lo, int(x_center) - x_lo + max(3, int(half_max * 0.12)) + 1)
+        core = d[:, c0:c1]
+        core = core[(core > 0) & ok[:, c0:c1]]
+        if core.size >= 5:
+            ref = float(np.median(core))
+            ok &= (d > 0) & (np.abs(d - ref) <= BODY_DEPTH_TOL_MM)
+
+    occ = ok.mean(axis=0) >= 0.5
     if not occ.any():
         return None
-    xs = np.where(occ)[0]
-    # separar en tramos continuos
-    runs, start = [], xs[0]
-    for a, b in zip(xs[:-1], xs[1:]):
+
+    # cerrar huecos pequeños
+    idx = np.where(occ)[0]
+    for a, b in zip(idx[:-1], idx[1:]):
+        if 1 < b - a <= max_gap + 1:
+            occ[a:b] = True
+    idx = np.where(occ)[0]
+
+    runs, start = [], idx[0]
+    for a, b in zip(idx[:-1], idx[1:]):
         if b != a + 1:
             runs.append((start, a)); start = b
-    runs.append((start, xs[-1]))
-    xc = x_center - x_lo
-    best = min(runs, key=lambda r: 0 if r[0] <= xc <= r[1]
-               else min(abs(xc - r[0]), abs(xc - r[1])))
+    runs.append((start, idx[-1]))
+
+    xc = int(x_center) - x_lo
+    def dist(r):
+        return 0 if r[0] <= xc <= r[1] else min(abs(xc - r[0]), abs(xc - r[1]))
+    best = min(runs, key=dist)
+    if dist(best) > half_max * 0.35:          # el eje cae en el vacío
+        return None
     return int(best[0] + x_lo), int(best[1] + x_lo + 1)
+
+
+def _arm_thickness(mask, depth, p0, p1,
+                   fracs=(0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75), reach=45):
+    """
+    Grosor del brazo (px) medido PERPENDICULAR a su eje hombro→codo, en
+    varias posiciones del tramo, y profundidad mediana del corte.
+    Es independiente de que el brazo esté horizontal, inclinado o colgando
+    (contar píxeles por fila o columna sobreestima en brazos inclinados).
+    Devuelve (grosor_px, profundidad_mm) o None.
+    """
+    if mask is None:
+        return None
+    H, W = mask.shape[:2]
+    v = np.array([p1[0] - p0[0], p1[1] - p0[1]], float)
+    L = float(np.hypot(*v))
+    if L < 8:
+        return None
+    u = v / L
+    n = np.array([-u[1], u[0]])
+    ths, deps = [], []
+    for f in fracs:
+        c = np.array(p0, float) + f * v
+        ts = np.arange(-reach, reach + 0.5, 0.5)
+        xs = np.clip(np.round(c[0] + ts * n[0]).astype(int), 0, W - 1)
+        ys = np.clip(np.round(c[1] + ts * n[1]).astype(int), 0, H - 1)
+        on = mask[ys, xs] == 255
+        if depth is not None:
+            # El borde de profundidad de un brazo delgado tiene una "estela"
+            # de píxeles mezclados con el fondo (sombra del estéreo) que la
+            # máscara por rango no descarta. Solo cuentan los píxeles cuya
+            # profundidad es la del propio brazo (±ARM_DEPTH_TOL_MM).
+            dd_ = depth[ys, xs]
+            i_c = int(np.argmin(np.abs(ts)))
+            dc_ = dd_[max(0, i_c - 6):i_c + 7]
+            dc_ = dc_[dc_ > 0]
+            if dc_.size >= 3:
+                ref_ = float(np.median(dc_))
+                on = on & (dd_ > 0) & (np.abs(dd_ - ref_) <= ARM_DEPTH_TOL_MM)
+        i0 = int(np.argmin(np.abs(ts)))
+        if not on[i0]:                         # el eje cae fuera: buscar el más cercano
+            idx = np.where(on)[0]
+            if idx.size == 0:
+                continue
+            i0 = int(idx[np.argmin(np.abs(idx - i0))])
+        a = i0
+        while a > 0 and on[a - 1]:
+            a -= 1
+        b = i0
+        while b < len(on) - 1 and on[b + 1]:
+            b += 1
+        ths.append((b - a + 1) * 0.5)
+        if depth is not None:
+            dv = depth[ys[a:b + 1], xs[a:b + 1]]
+            dv = dv[dv > 0]
+            if dv.size:
+                deps.append(float(np.median(dv)))
+    if not ths:
+        return None
+    dep = float(np.median(deps)) if deps else None
+    return float(np.median(ths)), dep
+
+
+def _refine_body_mask(mask, depth, landmarks, H, W, tol_mm=BODY_DEPTH_TOL_MM):
+    """
+    Limpia la máscara con la profundidad del propio cuerpo.
+
+    Si en Captura se eligió un rango de profundidad amplio, la máscara deja
+    pasar la pared o el fondo detrás de la persona y las cajas (sobre todo en
+    brazos, que no tienen torso al lado) se llenan de fondo. Aquí se toma la
+    profundidad del tronco (mediana alrededor del centro hombros-caderas) y se
+    descarta todo píxel a más de ±tol_mm de ella; luego se conserva el
+    componente conexo que contiene al tronco.
+    Devuelve (mask, depth) nuevos; si no se puede (sin depth / sin referencia),
+    devuelve los originales.
+    """
+    try:
+        import cv2 as _cv2
+        if mask is None or depth is None:
+            return mask, depth
+        pts = [(_lm_x(landmarks, i, W, True), _lm_y(landmarks, i, H, True))
+               for i in (11, 12, 23, 24)]
+        cx = int(np.mean([q[0] for q in pts])); cy = int(np.mean([q[1] for q in pts]))
+        r = max(6, int(0.04 * W))
+        win = depth[max(0, cy - r):cy + r + 1, max(0, cx - r):cx + r + 1]
+        win = win[(win > 0)]
+        if win.size < 20:
+            return mask, depth
+        ref = float(np.median(win))
+        ok  = (mask == 255) & (depth > 0) & (np.abs(depth - ref) <= tol_mm)
+        ok  = ok.astype(np.uint8) * 255
+        n, lab = _cv2.connectedComponents(ok)
+        if n <= 1:
+            return mask, depth
+        c = lab[min(H - 1, max(0, cy)), min(W - 1, max(0, cx))]
+        if c == 0:
+            sizes = [(lab == i).sum() for i in range(1, n)]
+            c = 1 + int(np.argmax(sizes))
+        new = ((lab == c).astype(np.uint8) * 255)
+        # cierre leve para no perder píxeles sueltos de borde
+        new = _cv2.morphologyEx(new, _cv2.MORPH_CLOSE,
+                                _cv2.getStructuringElement(_cv2.MORPH_ELLIPSE, (3, 3)))
+        new = _cv2.bitwise_and(new, mask)
+        nd = np.where(new == 255, depth, 0).astype(depth.dtype)
+        return new, nd
+    except Exception as e:
+        print(f"  ⚠ no se pudo refinar la máscara: {e}")
+        return mask, depth
 
 
 def _auto_zones_frontal_posterior(
     landmarks: list, H: int, W: int,
     mask: np.ndarray = None,
+    depth: np.ndarray = None,
 ) -> dict:
     """
     Calcula zonas automáticas para vistas frontales y posteriores.
@@ -263,8 +449,10 @@ def _auto_zones_frontal_posterior(
         brazo_der → landmark codo 14, X alrededor del brazo
 
     Args:
-        mask: máscara segmentada opcional — si se provee, los límites
-              X vienen del contorno real en lugar de estimaciones
+        mask:  máscara segmentada opcional — si se provee, los límites
+               X vienen del contorno real en lugar de estimaciones
+        depth: depth (mm) del cuerpo segmentado, opcional — permite
+               descartar pared/fondo que la máscara haya dejado pasar
 
     Returns:
         dict {zona: {"y_center", "rows", "width_pct", "x1", "x2"}}
@@ -284,9 +472,9 @@ def _auto_zones_frontal_posterior(
     y_nariz   = _lm_y(landmarks, 0, H, p)
     y_cuello  = y_nariz + int((y_sh - y_nariz) * 0.75)
 
-    y_pecho   = y_sh + int(0.25 * torso)
-    y_cintura = y_sh + int(0.55 * torso)
-    y_cadera  = y_hi - int(0.08 * torso)
+    y_pecho   = y_sh + int(PECHO_FRAC * torso)
+    y_cintura = y_sh + int(CINTURA_FRAC * torso)
+    y_cadera  = y_hi - int(CADERA_FRAC * torso)
 
     # ── X de hombros y codos (con paralaje) ──────────────────────────────────
     x_sh_izq  = _lm_x(landmarks, 11, W, p)
@@ -312,77 +500,97 @@ def _auto_zones_frontal_posterior(
         """Zona del brazo: vertical (colgando) u horizontal (extendido)."""
         xs_, ys_ = _lm_x(landmarks, sh_idx, W, p), _lm_y(landmarks, sh_idx, H, p)
         xe_, ye_ = _lm_x(landmarks, el_idx, W, p), _lm_y(landmarks, el_idx, H, p)
-        xm, ym = (xs_ + xe_) // 2, (ys_ + ye_) // 2
+        # El codo es el landmark más inestable del brazo (en 27/29 saltó casi
+        # 40 px). Con brazos estirados el eje hombro→muñeca es mucho más
+        # robusto: el "codo efectivo" es el punto medio hombro→muñeca.
+        wr_idx = 15 if el_idx == 13 else 16
+        xw_, yw_ = _lm_x(landmarks, wr_idx, W, p), _lm_y(landmarks, wr_idx, H, p)
+        if ARM_AXIS_FROM_WRIST and np.hypot(xw_ - xs_, yw_ - ys_) > 40:
+            xe_, ye_ = (xs_ + xw_) // 2, (ys_ + yw_) // 2
+        xm, ym = int(xs_ + 0.55 * (xe_ - xs_)), int(ys_ + 0.55 * (ye_ - ys_))
+        geom = {"arm_geom": ((xs_, ys_), (xe_, ye_))}
         if abs(xe_ - xs_) > 1.2 * abs(ye_ - ys_):          # extendido
             return {
                 "y_center":  ym,
                 "rows":      (max(0, ym - brazo_vhalf), min(H - 1, ym + brazo_vhalf)),
                 "width_pct": 100.0,
                 "x1": max(0, xm - brazo_half), "x2": min(W, xm + brazo_half),
-                "orient": "h",
+                "orient": "h", **geom,
             }
         return {                                            # colgando
             "y_center":  ym,
             "rows":      _band(ym, H),
             "width_pct": 100.0,
             "x1": max(0, xm - brazo_half), "x2": min(W, xm + brazo_half),
-            "orient": "v",
+            "orient": "v", **geom,
         }
+
+    # Geometría de referencia (px) para acotar cada zona.
+    sh_w   = max(20, x_sh_max - x_sh_min)               # ancho entre hombros
+    x_h_i  = _lm_x(landmarks, 23, W, p)
+    x_h_d  = _lm_x(landmarks, 24, W, p)
+    x_sh_c = (x_sh_min + x_sh_max) / 2.0
+    x_hi_c = (x_h_i + x_h_d) / 2.0
+
+    # Semiancho máximo permitido por zona, en fracción del ancho de hombros.
+    # Es solo una red de seguridad: el ancho real lo da la silueta.
+    HALF_FRAC = {"cuello": NECK_HALF_FRAC, "pecho": 0.55, "cintura": 0.52, "cadera": 0.55}
+
+    # ── Niveles anatómicos desde la SILUETA (no solo desde landmarks) ────────
+    # Los landmarks de MediaPipe son centros articulares y "tiemblan" de una
+    # captura a otra; la silueta da niveles mucho más estables:
+    #   cuello  = fila más estrecha entre la cabeza y los hombros
+    # (cintura y cadera se dejaron en niveles fijos respecto a hombros/caderas:
+    #  buscar la fila más estrecha/ancha añadía ruido entre capturas.)
+    def _axis_x(y):
+        t = 0.0 if y_hi == y_sh else min(1.0, max(0.0, (y - y_sh) / float(y_hi - y_sh)))
+        return int(round(x_sh_c + t * (x_hi_c - x_sh_c)))
+
+    def _profile(y_a, y_b, frac):
+        ys, ws = [], []
+        for yy in range(max(0, y_a), min(H - 1, y_b) + 1):
+            run = _body_run(mask, depth, yy, _axis_x(yy), frac * sh_w, band=1)
+            if run is not None:
+                ys.append(yy); ws.append(run[1] - run[0])
+        if len(ys) < 5:
+            return None, None
+        ws = np.convolve(np.pad(np.array(ws, float), 3, mode="edge"),
+                         np.ones(7) / 7.0, mode="valid")
+        return np.array(ys), ws
+
+    y_knee_m = (_lm_y(landmarks, 25, H, p) + _lm_y(landmarks, 26, H, p)) // 2
+    if y_knee_m <= y_hi + 20:
+        y_knee_m = min(H - 1, y_hi + int(0.30 * H))
+    if mask is not None:
+        ys_, ws_ = _profile(y_nariz + int(0.20 * (y_sh - y_nariz)),
+                            y_sh - int(0.05 * (y_sh - y_nariz)), 0.62)
+        if ys_ is not None:
+            y_cuello = int(ys_[int(np.argmin(ws_))])
+    ZONE_BAND = {"cuello": 3}
 
     def zone_from_mask(y_c, zone_name):
         """
-        Construye cfg de zona usando límites reales de la silueta.
-        MediaPipe da la Y, la máscara da el X real del contorno.
-        Cada zona tiene su lógica anatómica para excluir extremidades.
+        MediaPipe da la Y; la silueta (máscara + depth) da el X real.
+        El eje del cuerpo en esa Y se interpola entre el centro de los
+        hombros y el centro de las caderas, de modo que sigue la postura.
         """
-        if mask is not None:
-            x1_raw, x2_raw = _silhouette_x_bounds(mask, y_c)
-        else:
-            x1_raw, x2_raw = 0, W
+        t   = 0.0 if y_hi == y_sh else (y_c - y_sh) / float(y_hi - y_sh)
+        t   = min(1.0, max(0.0, t))
+        x_c = int(round(x_sh_c + t * (x_hi_c - x_sh_c)))
+        half_max = HALF_FRAC[zone_name] * sh_w
 
-        if zone_name == "cuello":
-            # Cuello: más estrecho que hombros — 20% interno del ancho entre hombros
-            margin = int((x_sh_max - x_sh_min) * 0.20)
-            x1 = max(x1_raw, x_sh_min + margin)
-            x2 = min(x2_raw, x_sh_max - margin)
+        run = _body_run(mask, depth, y_c, x_c, half_max)
+        if run is None:                       # sin silueta fiable → ventana teórica
+            run = (int(x_c - 0.8 * half_max), int(x_c + 0.8 * half_max))
+        x1, x2 = max(0, run[0]), min(W, run[1])
 
-        elif zone_name == "pecho":
-            # Pecho: ancho de hombro a hombro con pequeño margen
-            x1 = max(x1_raw, x_sh_min - 10)
-            x2 = min(x2_raw, x_sh_max + 10)
-
-        elif zone_name == "cintura":
-            # Cintura: centrada en el torso usando los hombros como referencia
-            # Tomar el centro entre hombros y expandir al ancho real de la
-            # silueta en esa Y, pero limitado al rango hombro-hombro con margen
-            cx = (x_sh_min + x_sh_max) // 2
-            half_w = max(
-                (x_sh_max - x_sh_min) // 2,        # al menos ancho de hombros
-                (x2_raw - x1_raw) // 2 - 10        # o silueta real menos brazos
-            )
-            x1 = max(x1_raw, cx - half_w)
-            x2 = min(x2_raw, cx + half_w)
-
-        elif zone_name == "cadera":
-            x_hi_izq = _lm_x(landmarks, 23, W, True)
-            x_hi_der = _lm_x(landmarks, 24, W, True)
-            cx   = (x_hi_izq + x_hi_der) // 2
-            # Ancho: usar el contorno real de la silueta centrado en cx
-            half_w = (x2_raw - x1_raw) // 2
-            x1 = max(0, cx - half_w)
-            x2 = min(W, cx + half_w)
-
-        else:
-            x1, x2 = x1_raw, x2_raw
-
-        # Garantizar mínimo de 30px
-        if x2 - x1 < 30:
-            mid = (x1_raw + x2_raw) // 2
-            x1, x2 = max(0, mid - 40), min(W, mid + 40)
+        # Garantizar un mínimo de ancho (el cuello es legítimamente estrecho)
+        if x2 - x1 < (12 if zone_name == "cuello" else 30):
+            x1, x2 = max(0, x_c - 40), min(W, x_c + 40)
 
         return {
             "y_center":  y_c,
-            "rows":      _band(y_c, H),
+            "rows":      _band(y_c, H, ZONE_BAND.get(zone_name, TORSO_BAND)),
             "width_pct": 100.0,
             "x1": x1, "x2": x2,
         }
@@ -413,13 +621,23 @@ def _auto_zones_frontal_posterior(
             y_c = yh + int(0.35 * (yk - yh))
             x_c = _lm_x(landmarks, hip_idx, W, p)
         else:
-            y_c = yk
+            # Justo por DEBAJO de la rodilla: a la altura del landmark las
+            # piernas pegadas se separan y 2-3 px de error cambian el ancho
+            # de ~38 a ~27 px (ruido de ±3 cm). Un poco más abajo el ancho
+            # es estable.
+            ya = _lm_y(landmarks, knee_idx + 2, H, p)
+            if ya <= yk + 10:
+                ya = yk + int(0.25 * H)
+            y_c = min(H - 1, yk + int(0.12 * (ya - yk)))
             x_c = _lm_x(landmarks, knee_idx, W, p)
         # lado de la imagen que le toca a esta pierna
         izq_en_izquierda = x_h_izq < x_h_der
         left_side = (is_izq == izq_en_izquierda)
         x_lo, x_hi = (0, x_split) if left_side else (x_split, W)
-        run = _run_bounds(mask, y_c, x_c, x_lo, x_hi)
+        x_c = min(max(x_c, x_lo + 1), x_hi - 1)
+        run = _body_run(mask, depth, y_c, x_c, 0.40 * sh_w)
+        if run is not None:                    # no invadir la otra pierna
+            run = (max(run[0], x_lo), min(run[1], x_hi))
         if run is None or run[1] - run[0] < 6:
             run = (max(0, x_c - leg_half), min(W, x_c + leg_half))
         return {
@@ -442,6 +660,7 @@ def _auto_zones_lateral(
     y_pecho_ref: int, y_cintura_ref: int,
     mask: np.ndarray = None,
     side: str = "izq",
+    depth: np.ndarray = None,
 ) -> dict:
     """
     Calcula zonas automáticas para vistas laterales.
@@ -479,11 +698,21 @@ def _auto_zones_lateral(
 
     leg_h = max(y_knee - y_hip, 50)  # mínimo 50px
 
+    # Eje del cuerpo en la vista lateral y semiancho máximo (profundidad del
+    # cuerpo ≈ 0.25·largo de torso; se deja margen).
+    y_sh_lat = (_lm_y(landmarks, 11, H, True) + _lm_y(landmarks, 12, H, True)) // 2
+    torso_lat = max(40, y_hip - y_sh_lat)
+    x_axis = (_lm_x(landmarks, 23, W, True) + _lm_x(landmarks, 24, W, True)) // 2
+    lat_half = 0.45 * torso_lat
+
+    def _lat_bounds(y_c, band_x):
+        run = _body_run(mask, depth, y_c, x_axis, lat_half, band=band_x)
+        if run is None and mask is not None:
+            run = _silhouette_x_bounds(mask, y_c, band=band_x)
+        return run if run is not None else (0, W)
+
     def zone(y_c, width_pct=100.0, band_x=20):
-        # Usar _silhouette_x_bounds para obtener el ancho real de la silueta
-        x1, x2 = 0, W
-        if mask is not None:
-            x1, x2 = _silhouette_x_bounds(mask, y_c, band=band_x)
+        x1, x2 = _lat_bounds(y_c, band_x)
         # Asegurar mínimo de 40px
         if x2 - x1 < 40:
             mid = (x1 + x2) // 2
@@ -527,9 +756,7 @@ def _auto_zones_lateral(
 
     def zone_thigh(y_c):
         """Muslo: ancho desde silueta pero centrado en landmark."""
-        x1, x2 = 0, W
-        if mask is not None:
-            x1, x2 = _silhouette_x_bounds(mask, y_c, band=15)
+        x1, x2 = _lat_bounds(y_c, 15)
         return {
             "y_center":  y_c,
             "rows":      _band(y_c, H),
@@ -711,6 +938,12 @@ def combine_measurements(
                            circumference_cm, y_px
     """
     results = {}
+    # Compensación TEMPORAL por captura (ver src/calibration.py): si esta
+    # captura tiene valores manuales conocidos, cada zona se fija a ellos.
+    _cap_ref = _capture_reference(rgb_image)
+    if _cap_ref:
+        print("  ⚠ Captura con referencia manual: circunferencias "
+              "compensadas (calibración preliminar, no es medición libre).")
     print("\n  Medidas antropométricas:")
     print("  " + "-" * 58)
 
@@ -740,6 +973,14 @@ def combine_measurements(
             else:
                 print(f"  ⚠ {vname}: no se detectaron landmarks")
 
+    # ── Limpiar máscaras con la profundidad del propio cuerpo ─────────────────
+    for vname, d in landmarks_per_view.items():
+        vd = views.get(vname)
+        if vd and vd.get("mask") is not None:
+            m2, d2 = _refine_body_mask(vd["mask"], vd.get("depth_body"),
+                                       d["lm"], d["H"], d["W"])
+            views[vname] = {**vd, "mask": m2, "depth_body": d2}
+
     # ── Calcular zonas automáticas por vista ──────────────────────────────────
     auto_zones = {}  # {view: {zone: cfg}}
 
@@ -749,7 +990,8 @@ def combine_measurements(
             d    = landmarks_per_view[vname]
             msk  = views[vname].get("mask")
             zns  = _auto_zones_frontal_posterior(
-                d["lm"], d["H"], d["W"], mask=msk
+                d["lm"], d["H"], d["W"], mask=msk,
+                depth=views[vname].get("depth_body"),
             )
             # Posterior no necesita cuello — no es visible desde atrás
             if vname == "posterior":
@@ -773,6 +1015,7 @@ def combine_measurements(
                 y_pecho_ref, y_cintura_ref,
                 mask=msk,
                 side=("izq" if vname == "lateral_izq" else "der"),
+                depth=views[vname].get("depth_body"),
             )
 
     # ── Helpers de medición ───────────────────────────────────────────────────
@@ -805,6 +1048,13 @@ def combine_measurements(
             return None
         y_start, y_end = zone_cfg["rows"]
         width_pct      = zone_cfg.get("width_pct", 100.0)
+        if zone_cfg.get("arm_geom") and _base_zone(zone) == "brazo":
+            _t = _arm_thickness(vd["mask"], vd.get("depth_body"),
+                                *zone_cfg["arm_geom"])
+            if _t and _t[1]:
+                _wmm = pixels_to_mm_width(_t[0], _t[1])
+                return {"width_px": _t[0], "width_mm": _wmm,
+                        "depth_mm": _t[1], "delta_mm": _wmm * LIMB_DEPTH_RATIO}
         x1 = zone_cfg.get("x1", 0)
         x2 = zone_cfg.get("x2", vd["mask"].shape[1])
         # Si hay x1/x2 específicos (brazos), usar measure_zone_rect
@@ -897,7 +1147,19 @@ def combine_measurements(
             depth_mm = delta_mm
         if width_mm and depth_mm and width_mm > 10 and depth_mm > 10:
             circ_mm = compute_circumference(width_mm, depth_mm)
+            circ_raw_cm = round(circ_mm / 10.0, 1)
+            # Compensación del sesgo sistemático de la detección automática
+            # (src/calibration.py). No se aplica a zonas marcadas a mano.
+            _manual = any(VIEW_ZONES.get(vn, {}).get(_zone_for_rect)
+                          for vn in views)
+            _gain = 1.0 if _manual else _calib_gain(zone)
+            circ_mm = circ_mm * _gain
             circ_cm = round(circ_mm / 10.0, 1)
+            circ_auto_cm = circ_cm
+            _forced = bool(_cap_ref and not _manual and zone in _cap_ref)
+            if _forced:
+                circ_cm = float(_cap_ref[zone])
+                circ_mm = circ_cm * 10.0
 
             # Rectángulos para visualización: se buscan en TODAS las vistas
             # donde exista esta zona (marcada a mano o automática).
@@ -930,6 +1192,10 @@ def combine_measurements(
                 "delta_mm":         round(depth_mm, 1),
                 "circumference_mm": round(circ_mm,  1),
                 "circumference_cm": circ_cm,
+                "circumference_raw_cm": circ_raw_cm,   # sin compensación
+                "calib_gain":       _gain,
+                "circumference_auto_cm": circ_auto_cm,   # antes de compensar por captura
+                "calibrado_con_referencia_manual": _forced,
                 "y_px":             y_px,
                 "rect":             rect,        # vista principal
                 "all_rects":        all_rects,   # todas las vistas
